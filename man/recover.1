@@ -1,0 +1,218 @@
+.TH RECOVER 1 "2026-09-19" "recover 0.1.0" "User Commands"
+.SH NAME
+recover \- record commands and their output, then find them again later
+.SH SYNOPSIS
+.B r
+.I "command ..."
+.br
+.B recover run
+.RB [ \-c ]
+.RI [ -- ]
+.I "command ..."
+.br
+.B recover
+.RI [ filters ]
+.br
+.B recover
+.I id
+.RB [ out | cmd | com | show | rerun | rm ]
+.RI [ args ]
+.br
+.B recover
+.RB { out | cmd | show | rerun | rm }
+.I id
+.br
+.B recover
+.RB { export | import | clear | db " " path | help }
+.SH DESCRIPTION
+Shell history keeps the command but throws away the output, exit code, and timing.
+.B recover
+opts a command into recording with a short prefix \(em
+.B r echo test
+\(em running it transparently (you still see live output) while saving the command, its
+combined stdout+stderr, exit code, timestamps, and duration into a single portable SQLite
+file. A taskwarrior\-style query CLI then lists, regex\-searches, and date\-filters those runs.
+.PP
+The command runs inside a pseudo\-terminal, so colors, progress bars, and interactive TUIs
+behave as in a normal shell. Output is stored verbatim (binary\-safe); ANSI escapes are
+stripped only for regex matching and for
+.BR "out \-\-strip" .
+Run ids are stable: a run's number never changes.
+.SH RECORDING
+.TP
+.B r \fIcommand ...\fR
+Run and record a command. Installed as a shell function:
+.RS
+.nf
+r() { recover run "$@"; }
+.fi
+.RE
+For a command whose name starts with a dash, use \fBrecover run \-\- \fIcommand\fR.
+.TP
+.B recover run \fR[\fB\-c\fR] [\fB\-\-\fR] \fIcommand ...\fR
+The underlying recorder.
+.B \-c
+runs the arguments as a shell pipeline via
+.BR $SHELL " " \-c
+(quote it), e.g. \fBrecover run \-c 'make 2>&1 | tail'\fR. Without
+.BR \-c ,
+the argument vector is executed directly. A pipeline typed unquoted
+(\fBr echo x | grep x\fR) records only the first stage \(em your interactive shell owns the
+pipe before \fBr\fR sees it; quote it or use \fB\-c\fR.
+.SH QUERYING
+Every run action can be written id\-first (\fBrecover 42 out\fR) or verb\-first
+(\fBrecover out 42\fR).
+.TP
+.B recover \fR[\fIfilters\fR]
+List matching runs, newest first (default limit 10). With no reserved word, bare
+\fIkey:value\fR tokens imply this listing.
+.TP
+.B recover \fIid\fR
+Show a run in full (metadata, note, and output).
+.TP
+.B recover \fIid\fR out\fR, \fBrecover out \fIid\fR \fR[\fB\-\-strip\fR]
+Print the run's stored output. With
+.B \-\-strip
+ANSI escapes are removed and CRLF is normalized. Raw output is byte\-for\-byte otherwise, so
+it pipes onward: \fBrecover 42 out | grep panic\fR.
+.TP
+.B recover \fIid\fR cmd\fR, \fBrecover cmd \fIid\fR
+Print just the command text.
+.TP
+.B recover \fIid\fR com\fR, \fBrecover \fIid\fB com "\fItext\fB"
+With no text, print the run's note. With text, set (or, if empty, clear) the note. Notes mark
+important runs: they appear after the command in the colored list when there is room, and are
+searchable with the \fBcom:\fR filter.
+.TP
+.B recover \fIid\fR show\fR, \fBrecover show \fIid\fR
+Print full detail for a run.
+.TP
+.B recover \fIid\fR rerun\fR, \fBrecover rerun \fIid\fR
+Re\-execute the stored command (through \fB$SHELL \-c\fR), recording a new run.
+.TP
+.B recover \fIid\fR rm\fR, \fBrecover rm \fIid\fR
+Delete a run. \fBrecover clear \-\-yes\fR deletes all runs.
+.SH RUN IDS
+A positive id is the run's stable, permanent number. A negative id counts back from the
+newest run: \fB\-1\fR is the most recent, \fB\-2\fR the one before, and so on \(em so you can
+act on a run without listing first. Negative ids are a quick\-mode feature (see
+.BR CONFIGURATION ).
+.SH FILTERS
+Filters are taskwarrior\-style \fIkey:value\fR tokens, combined with AND. Cheap predicates
+(date, exit code, limit) run in SQL; regex predicates run against the command and the
+ANSI\-stripped output.
+.TP
+.BI cmd: regex
+Regex over the command text.
+.TP
+.BI out: regex
+Regex over the output.
+.TP
+.BI reg: regex
+Regex over the command OR the output.
+.TP
+.BI com: regex
+Regex over the note.
+.TP
+.BI date: expr "\fR, \fB" date: A .. B "\fR, \fB" date.after: expr "\fR, \fB" date.before: expr
+Date bounds. \fBdate:\fIX\fR means at\-or\-after \fIX\fR (a window); \fBdate:\fIA\fB..\fIB\fR
+is the half\-open range [\fIA\fR, \fIB\fR); the one\-sided forms bound below/above.
+.TP
+.BI exit: code
+Only runs with this exit code.
+.TP
+.BI limit: n
+Cap the number of results (\fBlimit:0\fR means no cap; default 10).
+.PP
+Regex is Rust
+.BR regex (7)
+syntax, case\-sensitive by default \(em use \fB(?i)\fR for insensitive.
+.SH DATE EXPRESSIONS
+Anchors: \fBnow\fR, \fBtoday\fR, \fByesterday\fR, \fBtomorrow\fR, \fBYYYY-MM-DD\fR, and RFC3339
+timestamps. An anchor may carry one arithmetic term, \fIanchor\fR\fB\(+-\fIN\fBunit\fR, with
+units \fBs min h day week month year\fR \(em e.g. \fBtoday-5day\fR, \fBnow-2h\fR,
+\fBtoday+1week\fR.
+.PP
+A bare duration with no anchor is a quick\-mode shorthand for minus\-from\-default: day/week/
+month/year units count from \fBtoday\fR (midnight), while second/minute/hour units count from
+\fBnow\fR. So \fBdate:3day\fR == \fBdate:today-3day\fR, but \fBdate:2h\fR == \fBdate:now-2h\fR.
+Use \fB+\fR for the future (\fBdate:+3day\fR).
+.SH EXPORT AND IMPORT
+.TP
+.B recover export \fR[\fB\-\-json\fR] [\fIFILE\fR]
+Write all runs as JSON (to \fIFILE\fR, else stdout). Output is base64\-encoded to stay lossless.
+.TP
+.B recover import \fIFILE\fR
+Load runs from a JSON export, appending them.
+.TP
+.B recover db path
+Print the database file path (copy that one file to move your history).
+.SH CONFIGURATION
+Settings live in \fB~/.recoverc\fR (override the path with \fBRECOVER_CONFIG\fR). The file is
+optional. Format is \fIkey = value\fR, one per line, with \fB#\fR full\-line comments.
+.TP
+.B mode = quick|standard
+\fBquick\fR (default) enables the shortcuts: negative indices and bare\-duration dates.
+\fBstandard\fR disables them (positive ids and explicit anchors only). Does not affect colors.
+.TP
+.B color = auto|on|off
+Colorize the list. \fBauto\fR (default) colors only on a terminal; \fBon\fR forces it;
+\fBoff\fR disables it. The \fBNO_COLOR\fR environment variable always wins.
+.TP
+.B bar_color = #rrggbb
+Zebra\-stripe background (hex). Default \fB#000033\fR. Text on the stripe is auto\-chosen
+(black or white) for contrast.
+.TP
+.B header_color = #rrggbb
+Header text color (hex). Omit for bold only.
+.SH ENVIRONMENT
+.TP
+.B RECOVER_DB
+Path to the database file. Default \fB$XDG_DATA_HOME/recover/recover.db\fR, else
+\fB~/.local/share/recover/recover.db\fR.
+.TP
+.B RECOVER_CONFIG
+Path to the config file. Default \fB~/.recoverc\fR.
+.TP
+.B NO_COLOR
+If set, disables colored output regardless of the \fBcolor\fR setting.
+.TP
+.B SHELL
+Used by \fB\-c\fR and \fBrerun\fR to run shell command lines. Default \fB/bin/sh\fR.
+.SH FILES
+.TP
+.B ~/.local/share/recover/recover.db
+Default database (a single SQLite file).
+.TP
+.B ~/.recoverc
+Configuration file.
+.SH EXAMPLES
+.PP
+Record a command and inspect it:
+.RS
+.nf
+r cargo build
+recover                 # list recent runs
+recover \-1 out          # output of the run you just made
+recover \-1 com "green"  # flag it
+.fi
+.RE
+.PP
+Find things later:
+.RS
+.nf
+recover reg:panic date:today-5day
+recover cmd:'^git' exit:1
+recover com:important
+recover date:14day..7day          # last week, excluding this week
+.fi
+.RE
+.SH EXIT STATUS
+.B recover run
+exits with the recorded command's exit code. Query commands exit 0 on success and non\-zero
+on error (e.g. an unknown run id or an invalid filter).
+.SH SEE ALSO
+.BR sqlite3 (1),
+.BR regex (7)
+.SH AUTHOR
+Written with the assistance of Claude Code.
