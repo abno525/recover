@@ -97,8 +97,10 @@ Print full detail for a run.
 .B recover \fIid\fR rerun\fR, \fBrecover rerun \fIid\fR
 Re\-execute the stored command (through \fB$SHELL \-c\fR), recording a new run.
 .TP
-.B recover \fIid\fR rm\fR, \fBrecover rm \fIid\fR
-Delete a run. \fBrecover clear \-\-yes\fR deletes all runs.
+.B recover \fIid\fR rm\fR, \fBrecover \fR(\fBdel\fR|\fBrm\fR) \fIid\fR...
+Delete one or more runs immediately. \fBdel\fR and \fBrm\fR are aliases and both accept
+several ids at once (\fBrecover del 3 5 7\fR); ids that no longer exist are reported and
+skipped. \fBrecover clear \-\-yes\fR deletes all runs.
 .SH RUN IDS
 A positive id is the run's stable, permanent number. A negative id counts back from the
 newest run: \fB\-1\fR is the most recent, \fB\-2\fR the one before, and so on \(em so you can
@@ -161,6 +163,11 @@ optional. Format is \fIkey = value\fR, one per line, with \fB#\fR full\-line com
 .B mode = quick|standard
 \fBquick\fR (default) enables the shortcuts: negative indices and bare\-duration dates.
 \fBstandard\fR disables them (positive ids and explicit anchors only). Does not affect colors.
+.TP
+.B limit = \fIn\fR
+How many rows the quick list (bare \fBrecover\fR) shows by default. Default \fB10\fR;
+\fB0\fR means no cap. \fBrecover list\fR and \fB\-l\fR ignore this (always uncapped), and a
+\fBlimit:\fIn\fR filter token overrides it for a single invocation.
 .TP
 .B color = auto|on|off
 Colorize the list. \fBauto\fR (default) colors only on a terminal; \fBon\fR forces it;

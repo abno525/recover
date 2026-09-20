@@ -26,6 +26,8 @@ pub struct Config {
     pub color: ColorMode,
     pub bar_color: Option<Rgb>,
     pub header_color: Option<Rgb>,
+    /// Default number of rows shown by bare `recover` (0 = no cap). `list`/`-l` ignore it.
+    pub limit: usize,
 }
 
 impl Default for Config {
@@ -35,6 +37,7 @@ impl Default for Config {
             color: ColorMode::Auto,
             bar_color: None,
             header_color: None,
+            limit: 10,
         }
     }
 }
@@ -76,6 +79,11 @@ pub fn parse(text: &str) -> Result<Config, String> {
             }
             "bar_color" => cfg.bar_color = Some(Rgb::parse_hex(val)?),
             "header_color" => cfg.header_color = Some(Rgb::parse_hex(val)?),
+            "limit" => {
+                cfg.limit = val
+                    .parse()
+                    .map_err(|_| format!("invalid limit `{val}` (expected a non-negative integer)"))?
+            }
             other => return Err(format!("unknown config key `{other}`")),
         }
     }
@@ -158,10 +166,18 @@ mod tests {
     }
 
     #[test]
+    fn limit_defaults_to_ten_and_parses() {
+        assert_eq!(Config::default().limit, 10);
+        assert_eq!(parse("limit = 25\n").unwrap().limit, 25);
+        assert_eq!(parse("limit = 0\n").unwrap().limit, 0); // 0 = no cap
+    }
+
+    #[test]
     fn rejects_bad_values_and_keys() {
         assert!(parse("mode = fancy").is_err());
         assert!(parse("color = rainbow").is_err());
         assert!(parse("bar_color = nothex").is_err());
+        assert!(parse("limit = notanumber").is_err());
         assert!(parse("unknown = 1").is_err());
         assert!(parse("noequalssign").is_err());
     }

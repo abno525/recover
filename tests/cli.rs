@@ -251,6 +251,64 @@ fn bare_list_is_capped_but_browse_is_uncapped() {
 }
 
 #[test]
+fn config_limit_sets_quick_list_size() {
+    let db = tmp_db("cfglimit");
+    for i in 0..5 {
+        run(&db, &["run", "--", "echo", &format!("row{i}")]);
+    }
+    let cfg = cfg_path("limit3");
+    std::fs::write(&cfg, "limit = 3\n").unwrap();
+
+    // bare `recover` honors the configured default: header + 3 rows = 4 lines
+    let quick = stdout(&run_cfg(&db, &cfg, &[]));
+    assert_eq!(quick.lines().count(), 4, "quick list should show 3 rows: {quick}");
+
+    // `recover list` ignores the cap and shows all 5 (header + 5 = 6 lines)
+    let full = stdout(&run_cfg(&db, &cfg, &["list"]));
+    assert_eq!(full.lines().count(), 6, "list should be uncapped: {full}");
+
+    // a limit: filter still overrides per-invocation
+    let one = stdout(&run_cfg(&db, &cfg, &["limit:1"]));
+    assert_eq!(one.lines().count(), 2, "limit:1 should override: {one}");
+
+    let _ = std::fs::remove_file(&cfg);
+}
+
+#[test]
+fn del_removes_multiple_ids() {
+    let db = tmp_db("delmulti");
+    run(&db, &["run", "--", "echo", "one"]);
+    run(&db, &["run", "--", "echo", "two"]);
+    run(&db, &["run", "--", "echo", "three"]);
+
+    let out = run(&db, &["del", "1", "3"]);
+    assert!(out.status.success(), "del should succeed");
+    let text = stdout(&out);
+    assert!(text.contains("deleted run 1") && text.contains("deleted run 3"), "del output: {text}");
+
+    // only run 2 remains
+    let remaining = stdout(&run(&db, &["limit:0"]));
+    assert!(remaining.contains("echo two"), "run 2 should remain: {remaining}");
+    assert!(!remaining.contains("echo one") && !remaining.contains("echo three"), "1 and 3 gone");
+}
+
+#[test]
+fn rm_is_an_alias_and_missing_id_errors() {
+    let db = tmp_db("delalias");
+    run(&db, &["run", "--", "echo", "keep"]);
+    run(&db, &["run", "--", "echo", "drop"]);
+
+    // `rm` still works as an alias of `del`
+    assert!(run(&db, &["rm", "2"]).status.success());
+    assert!(!stdout(&run(&db, &["limit:0"])).contains("echo drop"));
+
+    // deleting a non-existent id fails with a clear message
+    let missing = run(&db, &["del", "999"]);
+    assert!(!missing.status.success(), "del of a missing id should fail");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no run with id 999"));
+}
+
+#[test]
 fn db_path_reports_the_override() {
     let db = tmp_db("dbpath");
     let out = run(&db, &["db", "path"]);

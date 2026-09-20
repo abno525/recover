@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Write};
 
 const RESERVED: &[&str] = &[
-    "run", "list", "out", "cmd", "show", "rerun", "rm", "clear", "export", "import", "db", "help",
-    "--help", "-h",
+    "run", "list", "out", "cmd", "show", "rerun", "rm", "del", "clear", "export", "import", "db",
+    "help", "--help", "-h",
 ];
 
 fn main() {
@@ -48,7 +48,7 @@ fn real_main() -> Result<i32> {
         "cmd" => cmd_cmd(rest),
         "show" => cmd_show(rest),
         "rerun" => cmd_rerun(rest),
-        "rm" => cmd_rm(rest),
+        "rm" | "del" => cmd_rm(rest),
         "clear" => cmd_clear(rest),
         "export" => cmd_export(rest),
         "import" => cmd_import(rest),
@@ -99,8 +99,8 @@ fn cmd_id_action(idx: i64, rest: &[String]) -> Result<i32> {
         "cmd" => cmd_cmd(&with_id()),
         "show" => cmd_show(&with_id()),
         "rerun" => cmd_rerun(&with_id()),
-        "rm" => cmd_rm(&with_id()),
-        other => bail!("unknown action `{other}` for a run (try: out, cmd, com, show, rerun, rm)"),
+        "rm" | "del" => cmd_rm(&with_id()),
+        other => bail!("unknown action `{other}` for a run (try: out, cmd, com, show, rerun, rm/del)"),
     }
 }
 
@@ -205,9 +205,10 @@ fn cmd_list(rest: &[String], browse_explicit: bool) -> Result<i32> {
     let filter_toks: Vec<String> = rest.iter().filter(|a| a.as_str() != "-l").cloned().collect();
     let mut filters =
         filter::parse(&filter_toks, Utc::now(), cfg.shortcuts()).map_err(anyhow::Error::msg)?;
-    // The table caps at 10 by default; `-l` pulls in every match to scroll (limit:N still overrides).
+    // The quick table caps at the configured default; `-l`/`list` pull in every match to
+    // scroll. A `limit:N` filter token overrides either way.
     if filters.limit.is_none() {
-        filters.limit = Some(if browse { 0 } else { 10 });
+        filters.limit = Some(if browse { 0 } else { cfg.limit });
     }
     let db = open_db()?;
     let runs = db.query(&filters)?;
@@ -298,16 +299,32 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
 
 // ---- rm / clear -----------------------------------------------------------
 
+/// Delete one or more runs (`recover del|rm <id...>`).
 fn cmd_rm(rest: &[String]) -> Result<i32> {
-    let idx = single_id(rest)?;
-    let db = open_db()?;
-    let id = resolve_index(&db, idx)?;
-    if db.delete(id)? {
-        println!("deleted run {id}");
-        Ok(0)
-    } else {
-        Err(no_such(id))
+    if rest.is_empty() {
+        bail!("expected a run id");
     }
+    let db = open_db()?;
+    // Resolve all indices to concrete ids first so negative indices (e.g. -1) aren't shifted
+    // by deletions happening mid-loop; de-dup while preserving order.
+    let mut ids: Vec<i64> = Vec::new();
+    for a in rest {
+        let id = resolve_index(&db, parse_id(a)?)?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let mut deleted_any = false;
+    for id in &ids {
+        if db.delete(*id)? {
+            println!("deleted run {id}");
+            deleted_any = true;
+        } else {
+            eprintln!("recover: no run with id {id}");
+        }
+    }
+    // Exit nonzero when nothing was deleted; the per-id message above already explained why.
+    Ok(if deleted_any { 0 } else { 1 })
 }
 
 fn cmd_clear(rest: &[String]) -> Result<i32> {
@@ -476,8 +493,9 @@ USAGE:\n\
   recover [filters]                     quick list of recent runs (newest first, capped)\n\
   recover list [filters] | recover [filters] -l   same list in a scrollable pager (uncapped)\n\
   recover <id>                          show a run in full\n\
-  recover <id> out|cmd|com|show|rerun|rm [args]   act on a run (id-first)\n\
-  recover out|cmd|show|rerun|rm <id>    act on a run (verb-first)\n\
+  recover <id> out|cmd|com|show|rerun|rm|del [args]   act on a run (id-first)\n\
+  recover out|cmd|show|rerun <id>       act on a run (verb-first)\n\
+  recover del|rm <id...>               delete one or more runs\n\
   recover <id> com \"text\"               add or replace a run's note\n\
   recover export [--json FILE] | import <FILE>    dump / load all runs as JSON\n\
   recover clear --yes                   delete all runs\n\
