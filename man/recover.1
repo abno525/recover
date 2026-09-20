@@ -64,8 +64,15 @@ Every run action can be written id\-first (\fBrecover 42 out\fR) or verb\-first
 (\fBrecover out 42\fR).
 .TP
 .B recover \fR[\fIfilters\fR]
-List matching runs, newest first (default limit 10). With no reserved word, bare
+Quick list of matching runs, newest first (default limit 10). With no reserved word, bare
 \fIkey:value\fR tokens imply this listing.
+.TP
+.B recover list \fR[\fIfilters\fR]\fR, \fBrecover \fR[\fIfilters\fR] \fB\-l\fR
+The same listing in a scrollable pager \(em these two forms are identical. Unlike the quick
+list there is no default limit, so every matching run can be paged through (\fBlimit:\fIn\fR
+still applies). In the pager, \fB/\fR starts a regex search over the rows, \fBn\fR/\fBN\fR move
+between matches, and \fBq\fR quits; a listing that fits on screen just prints. When stdout is
+not a terminal the listing is written plainly, so \fBrecover list | grep git\fR works.
 .TP
 .B recover \fIid\fR
 Show a run in full (metadata, note, and output).

@@ -40,7 +40,10 @@ fn real_main() -> Result<i32> {
     let (cmd, rest) = split_command(&args);
     match cmd {
         "run" => cmd_run(rest),
-        "list" => cmd_list(rest),
+        // Implicit list (bare `recover [filters]`) is the quick capped table; the explicit
+        // `list` word is the paged view, identical to the `-l` flag.
+        "list" => cmd_list(rest, false),
+        "list-browse" => cmd_list(rest, true),
         "out" => cmd_out(rest),
         "cmd" => cmd_cmd(rest),
         "show" => cmd_show(rest),
@@ -58,10 +61,13 @@ fn real_main() -> Result<i32> {
 }
 
 /// Reserved word → (subcommand, remaining args); otherwise implicit `list` over all tokens.
+/// The explicit `list` word maps to `list-browse` (the paged view); a bare filter listing
+/// stays the quick `list`.
 fn split_command(args: &[String]) -> (&str, &[String]) {
     match args.first() {
         None => ("list", args),
         Some(f) if f == "help" || f == "--help" || f == "-h" => ("help", &args[1..]),
+        Some(f) if f == "list" => ("list-browse", &args[1..]),
         Some(f) if RESERVED.contains(&f.as_str()) => (f.as_str(), &args[1..]),
         Some(_) => ("list", args),
     }
@@ -190,12 +196,18 @@ fn run_and_record(command_str: String, argv: &[String]) -> Result<i32> {
 
 // ---- list -----------------------------------------------------------------
 
-fn cmd_list(rest: &[String]) -> Result<i32> {
+fn cmd_list(rest: &[String], browse_explicit: bool) -> Result<i32> {
     let cfg = config::load();
+
+    // Browse (paged) when the `list` word was used or the `-l` flag is present; either way
+    // pull `-l` out before parsing filters. `recover list X` and `recover X -l` are identical.
+    let browse = browse_explicit || rest.iter().any(|a| a == "-l");
+    let filter_toks: Vec<String> = rest.iter().filter(|a| a.as_str() != "-l").cloned().collect();
     let mut filters =
-        filter::parse(rest, Utc::now(), cfg.shortcuts()).map_err(anyhow::Error::msg)?;
+        filter::parse(&filter_toks, Utc::now(), cfg.shortcuts()).map_err(anyhow::Error::msg)?;
+    // The table caps at 10 by default; `-l` pulls in every match to scroll (limit:N still overrides).
     if filters.limit.is_none() {
-        filters.limit = Some(10);
+        filters.limit = Some(if browse { 0 } else { 10 });
     }
     let db = open_db()?;
     let runs = db.query(&filters)?;
@@ -206,15 +218,38 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
         config::ColorMode::On => !no_color,
         config::ColorMode::Auto => std::io::stdout().is_terminal() && !no_color,
     };
-    let width = match (want_color, crossterm::terminal::size()) {
+    let mut width = match (want_color, crossterm::terminal::size()) {
         (true, Ok((c, _))) if c >= 20 => c as usize,
         _ => 100,
     };
+    // In the pager, leave one column free so full-width zebra rows don't wrap onto a blank line.
+    if browse && want_color {
+        width = width.saturating_sub(1);
+    }
     let style = want_color.then(|| render::ListStyle {
         bar_bg: cfg.bar_color.unwrap_or(render::DEFAULT_BAR),
         header: cfg.header_color,
     });
-    print!("{}", render::format_list(&runs, style.as_ref(), width));
+    let listing = render::format_list(&runs, style.as_ref(), width);
+
+    if browse {
+        return page_document(listing);
+    }
+    print!("{listing}");
+    Ok(0)
+}
+
+/// Display `doc` in a scrollable pager (`/` regex search, `q` to quit) when stdout is a
+/// terminal; otherwise dump it plainly so `recover -l | grep …` keeps working.
+fn page_document(doc: String) -> Result<i32> {
+    if std::io::stdout().is_terminal() {
+        let pager = minus::Pager::new();
+        pager.push_str(&doc)?;
+        let _ = pager.set_prompt("recover    / search    q quit");
+        minus::page_all(pager)?;
+    } else {
+        std::io::stdout().write_all(doc.as_bytes())?;
+    }
     Ok(0)
 }
 
@@ -438,7 +473,8 @@ fn print_help() {
 USAGE:\n\
   r <command...>                        run a command, recording it\n\
   recover run [-c] [--] <command...>    the underlying recorder (-c = shell pipeline)\n\
-  recover [filters]                     list recent runs (newest first)\n\
+  recover [filters]                     quick list of recent runs (newest first, capped)\n\
+  recover list [filters] | recover [filters] -l   same list in a scrollable pager (uncapped)\n\
   recover <id>                          show a run in full\n\
   recover <id> out|cmd|com|show|rerun|rm [args]   act on a run (id-first)\n\
   recover out|cmd|show|rerun|rm <id>    act on a run (verb-first)\n\

@@ -199,6 +199,58 @@ fn id_first_out_cmd_and_show_forms() {
 }
 
 #[test]
+fn list_word_and_dash_l_are_identical_and_paged() {
+    let db = tmp_db("browse");
+    run(&db, &["run", "--", "echo", "alpha"]);
+    run(&db, &["run", "--", "echo", "beta"]);
+
+    // stdout is piped in tests (not a TTY), so both forms write the listing plainly.
+    let via_word = stdout(&run(&db, &["list", "cmd:e"]));
+    let via_flag = stdout(&run(&db, &["cmd:e", "-l"]));
+    assert_eq!(via_word, via_flag, "`list X` and `X -l` must be identical");
+
+    // Both are the ordinary listing: table header plus one row per matching command.
+    assert!(via_word.contains("STARTED") && via_word.contains("COMMAND"), "header: {via_word}");
+    assert!(via_word.contains("echo alpha") && via_word.contains("echo beta"), "rows: {via_word}");
+}
+
+#[test]
+fn browse_respects_filters_in_either_position() {
+    let db = tmp_db("browsefilter");
+    run(&db, &["run", "--", "echo", "alpha"]);
+    run(&db, &["run", "--", "echo", "beta"]);
+
+    // `-l` after the filter
+    let a = stdout(&run(&db, &["cmd:alpha", "-l"]));
+    assert!(a.contains("echo alpha") && !a.contains("echo beta"), "cmd:alpha -l: {a}");
+
+    // the explicit `list` word, and `list` + `-l` together
+    let b = stdout(&run(&db, &["list", "cmd:beta"]));
+    assert!(b.contains("echo beta") && !b.contains("echo alpha"), "list cmd:beta: {b}");
+    let c = stdout(&run(&db, &["list", "-l", "cmd:beta"]));
+    assert!(c.contains("echo beta") && !c.contains("echo alpha"), "list -l cmd:beta: {c}");
+}
+
+#[test]
+fn bare_list_is_capped_but_browse_is_uncapped() {
+    let db = tmp_db("browsecap");
+    for i in 0..12 {
+        run(&db, &["run", "--", "echo", &format!("line{i}")]);
+    }
+    // bare `recover` is the quick list: 10 data rows (11 lines incl. the header)
+    let plain = stdout(&run(&db, &[]));
+    assert_eq!(plain.lines().count(), 11, "bare recover should cap at 10 rows: {plain}");
+    assert!(!plain.contains("echo line0"), "oldest run should be capped out of the quick list");
+
+    // `recover list` and `-l` have no cap: header + all 12 rows = 13 lines
+    let word = stdout(&run(&db, &["list"]));
+    let flag = stdout(&run(&db, &["-l"]));
+    assert_eq!(word.lines().count(), 13, "list should show every run: {word}");
+    assert_eq!(flag.lines().count(), 13, "-l should show every run: {flag}");
+    assert!(word.contains("echo line0"), "oldest run should be present: {word}");
+}
+
+#[test]
 fn db_path_reports_the_override() {
     let db = tmp_db("dbpath");
     let out = run(&db, &["db", "path"]);
