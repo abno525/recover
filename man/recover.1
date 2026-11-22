@@ -202,6 +202,12 @@ Zebra\-stripe background (hex). Default \fB#000033\fR. Text on the stripe is aut
 .TP
 .B header_color = #rrggbb
 Header text color (hex). Omit for bold only.
+.TP
+.B max_output = \fIsize\fR
+Most output stored per run, in bytes or with a \fBK\fR, \fBM\fR or \fBG\fR suffix (powers of
+1024). Default \fB16M\fR; \fB0\fR stores everything. Longer output keeps its first and last
+halves, cut to whole lines, with a \fB[recover: \fIN\fB bytes omitted]\fR line in between.
+The output shown live while the command runs is never cut.
 .SH ENVIRONMENT
 .TP
 .B RECOVER_DB

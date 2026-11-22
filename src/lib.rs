@@ -1,5 +1,6 @@
 //! `recover` — record commands and their output, query them later.
 
+pub mod capture;
 pub mod config;
 pub mod db;
 pub mod filter;

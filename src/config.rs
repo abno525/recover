@@ -28,6 +28,8 @@ pub struct Config {
     pub header_color: Option<Rgb>,
     /// Default number of rows shown by bare `recover` (0 = no cap). `list`/`-l` ignore it.
     pub limit: usize,
+    /// Most bytes of output stored per run (0 = no cap); past it the start and end are kept.
+    pub max_output: usize,
 }
 
 impl Default for Config {
@@ -38,6 +40,7 @@ impl Default for Config {
             bar_color: None,
             header_color: None,
             limit: 10,
+            max_output: 16 * 1024 * 1024,
         }
     }
 }
@@ -84,10 +87,31 @@ pub fn parse(text: &str) -> Result<Config, String> {
                     .parse()
                     .map_err(|_| format!("invalid limit `{val}` (expected a non-negative integer)"))?
             }
+            "max_output" => cfg.max_output = parse_size(val)?,
             other => return Err(format!("unknown config key `{other}`")),
         }
     }
     Ok(cfg)
+}
+
+/// Parse a byte count: plain digits, or digits followed by `K`, `M` or `G` (powers of 1024).
+fn parse_size(val: &str) -> Result<usize, String> {
+    let err = || format!("invalid max_output `{val}` (expected bytes, e.g. 16M, 512K or 0)");
+    let (digits, unit) = match val.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&val[..i], c.to_ascii_uppercase()),
+        _ => (val, ' '),
+    };
+    let factor: usize = match unit {
+        ' ' => 1,
+        'K' => 1 << 10,
+        'M' => 1 << 20,
+        'G' => 1 << 30,
+        _ => return Err(err()),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(err());
+    }
+    digits.parse::<usize>().ok().and_then(|n| n.checked_mul(factor)).ok_or_else(err)
 }
 
 /// Resolve the config path from explicit inputs (empty values count as unset):
@@ -223,6 +247,20 @@ mod tests {
         assert_eq!(Config::default().limit, 10);
         assert_eq!(parse("limit = 25\n").unwrap().limit, 25);
         assert_eq!(parse("limit = 0\n").unwrap().limit, 0); // 0 = no cap
+    }
+
+    #[test]
+    fn max_output_defaults_to_16_mib_and_takes_suffixes() {
+        assert_eq!(Config::default().max_output, 16 * 1024 * 1024);
+        let size = |v: &str| parse(&format!("max_output = {v}\n")).map(|c| c.max_output);
+        assert_eq!(size("512K"), Ok(512 * 1024));
+        assert_eq!(size("16M"), Ok(16 * 1024 * 1024));
+        assert_eq!(size("1g"), Ok(1024 * 1024 * 1024));
+        assert_eq!(size("1234"), Ok(1234));
+        assert_eq!(size("0"), Ok(0)); // no cap
+        for bad in ["", "abc", "12X", "-1", "1.5M", "99999999999999999999G"] {
+            assert!(size(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]

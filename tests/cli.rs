@@ -218,6 +218,22 @@ fn a_terminal_resize_reaches_the_command() {
 }
 
 #[test]
+fn max_output_caps_what_is_stored_but_not_what_is_shown() {
+    let db = tmp_db("cap");
+    let cfg = cfg_path("cap");
+    std::fs::write(&cfg, "max_output = 1K\n").unwrap();
+    let out = run_cfg(&db, &cfg, &["run", "--", "seq", "1", "5000"]);
+    assert_eq!(stdout(&out).lines().count(), 5000, "live output is complete");
+    let stored = stdout(&run(&db, &["out", "1"]));
+    // The cap covers the kept output; the one-line marker comes on top of it.
+    assert!(stored.len() <= 1024 + 64, "stored {} bytes", stored.len());
+    assert!(stored.starts_with("1\n2\n3\n"), "head: {stored:?}");
+    assert!(stored.contains(" bytes omitted]\n"), "marker: {stored:?}");
+    assert!(stored.ends_with("4999\n5000\n"), "tail: {stored:?}");
+    let _ = std::fs::remove_file(&cfg);
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);

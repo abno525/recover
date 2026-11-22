@@ -174,7 +174,7 @@ fn cmd_rerun(rest: &[String]) -> Result<i32> {
 
 /// Run `argv` in a PTY, store the result under `command_str`, and return the child's exit code.
 fn run_and_record(command_str: String, argv: &[String]) -> Result<i32> {
-    let rec = record::run_command(argv)?;
+    let rec = record::run_command(argv, config::load().max_output)?;
     let new = NewRun {
         command: command_str,
         output: rec.output,

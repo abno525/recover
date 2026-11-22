@@ -5,6 +5,7 @@
 //! With piped or redirected input it runs without one: stdin passes straight through and
 //! stdout+stderr are captured from a pipe, so programs may turn their colors off.
 
+use crate::capture::Capture;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -51,13 +52,14 @@ fn tty_size() -> Option<(u16, u16)> {
 }
 
 /// Execute `argv` (program + args), streaming its output live and capturing stdout and
-/// stderr combined.
-pub fn run_command(argv: &[String]) -> Result<Recorded> {
+/// stderr combined, at most `max_output` bytes of it (0 = all; see [`Capture`]).
+pub fn run_command(argv: &[String], max_output: usize) -> Result<Recorded> {
     anyhow::ensure!(!argv.is_empty(), "no command given");
+    let capture = Capture::new(max_output);
     if std::io::stdin().is_terminal() {
-        run_in_pty(argv)
+        run_in_pty(argv, capture)
     } else {
-        run_piped(argv)
+        run_piped(argv, capture)
     }
 }
 
@@ -100,16 +102,16 @@ const DRAIN_MAX: Duration = Duration::from_secs(2);
 fn pump(
     rx: &mpsc::Receiver<Vec<u8>>,
     child: &mut std::process::Child,
+    mut captured: Capture,
     mut tick: impl FnMut(),
 ) -> Result<(Vec<u8>, ExitStatus)> {
     let mut stdout = std::io::stdout();
-    let mut captured = Vec::new();
     let mut exited: Option<(ExitStatus, Instant)> = None;
     let mut last_output = Instant::now();
     loop {
         match rx.recv_timeout(POLL) {
             Ok(chunk) => {
-                captured.extend_from_slice(&chunk);
+                captured.push(&chunk);
                 let _ = stdout.write_all(&chunk);
                 let _ = stdout.flush();
                 last_output = Instant::now();
@@ -137,7 +139,7 @@ fn pump(
         Some((status, _)) => status,
         None => child.wait()?,
     };
-    Ok((captured, status))
+    Ok((captured.finish(), status))
 }
 
 /// Split an exit status into (exit code, signal name, shell-style status). A command
@@ -179,7 +181,7 @@ fn recorded(
 }
 
 /// No terminal on stdin: inherit stdin, capture stdout+stderr through one pipe.
-fn run_piped(argv: &[String]) -> Result<Recorded> {
+fn run_piped(argv: &[String], capture: Capture) -> Result<Recorded> {
     let (reader, writer) = std::io::pipe()?;
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).stdout(writer.try_clone()?).stderr(writer);
@@ -190,12 +192,12 @@ fn run_piped(argv: &[String]) -> Result<Recorded> {
     // `Command` keeps its copies of the pipe's write end: drop them, or EOF never arrives.
     drop(cmd);
 
-    let (output, status) = pump(&spawn_reader(reader), &mut child, || {})?;
+    let (output, status) = pump(&spawn_reader(reader), &mut child, capture, || {})?;
     Ok(recorded(output, status_parts(status), started_at, start))
 }
 
 /// A terminal on stdin: run in a PTY, forwarding keystrokes in raw mode.
-fn run_in_pty(argv: &[String]) -> Result<Recorded> {
+fn run_in_pty(argv: &[String], capture: Capture) -> Result<Recorded> {
     let pty_size = |(rows, cols)| PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let mut size = tty_size().unwrap_or((24, 80));
     let pair = native_pty_system().openpty(pty_size(size))?;
@@ -248,7 +250,7 @@ fn run_in_pty(argv: &[String]) -> Result<Recorded> {
             let _ = pair.master.resize(pty_size(now));
         }
     };
-    let (output, status) = pump(&rx, child, follow_resizes)?;
+    let (output, status) = pump(&rx, child, capture, follow_resizes)?;
     drop(raw); // restore cooked mode before we print anything else
     Ok(recorded(output, status_parts(status), started_at, start))
 }
