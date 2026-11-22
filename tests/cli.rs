@@ -179,6 +179,31 @@ fn a_signal_death_in_a_pty_exits_128_plus_the_signal_number() {
 }
 
 #[test]
+fn a_background_process_does_not_keep_recover_waiting() {
+    let db = tmp_db("bg-pipe");
+    let cmd = recover_cmd(&db, &cfg_path("absent"), &["run", "--", "sh", "-c", "echo before; sleep 3 &"]);
+    let started = std::time::Instant::now();
+    let out = output_within(cmd, Some(b""), 10);
+    let took = started.elapsed();
+    assert!(out.status.success());
+    assert!(took < std::time::Duration::from_secs(2), "recover waited {took:?} for the orphan");
+    assert_eq!(stdout(&run(&db, &["out", "1", "--strip"])), "before\n");
+}
+
+#[test]
+fn a_background_process_does_not_keep_recover_waiting_in_a_pty() {
+    let db = tmp_db("bg-tty");
+    // Ignore SIGHUP so the orphan survives the PTY closing and really holds it open.
+    let line = format!("'{}' run -- sh -c 'trap \"\" HUP; echo before; sleep 3 &'", bin());
+    let started = std::time::Instant::now();
+    let Some(out) = run_in_tty(&db, &line, 10) else { return };
+    let took = started.elapsed();
+    assert!(out.status.success(), "script stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(took < std::time::Duration::from_secs(2), "recover waited {took:?} for the orphan");
+    assert_eq!(stdout(&run(&db, &["out", "1", "--strip"])), "before\n");
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);

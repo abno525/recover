@@ -65,6 +65,11 @@ terminal, the command runs in a pseudo\-terminal, so colors and full\-screen pro
 and your keystrokes reach it. When input is piped or redirected (\fBcat log | r grep err\fR),
 the command runs without one: stdin passes straight through and output is captured from a
 pipe, so programs may turn colors off.
+.PP
+Recording ends when the command exits. A background job it started (\fBserver &\fR) is not
+waited for: output that arrives within a moment of the exit is still recorded, then recover
+stops listening, and the job loses its output (it gets an error or a hangup on its next
+write).
 .SH QUERYING
 Every run action can be written id\-first (\fBrecover 42 out\fR) or verb\-first
 (\fBrecover out 42\fR).

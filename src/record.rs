@@ -10,8 +10,9 @@ use chrono::{DateTime, Utc};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The result of running a command.
 pub struct Recorded {
@@ -79,16 +80,56 @@ fn spawn_reader(mut reader: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8
     rx
 }
 
-/// Copy every chunk to our stdout and keep it, until the reader reaches EOF.
-fn relay(rx: mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+/// How often to check on the child while its output is quiet.
+const POLL: Duration = Duration::from_millis(25);
+/// After the child exits, stop once its output has been quiet this long...
+const DRAIN_IDLE: Duration = Duration::from_millis(200);
+/// ...or this long after the exit at the latest, even if output keeps coming.
+const DRAIN_MAX: Duration = Duration::from_secs(2);
+
+/// Copy output to our stdout and keep a copy, until the child has exited and its output
+/// has drained. Returns the captured bytes and the child's exit status.
+///
+/// EOF alone is not a reliable end: a background job the command started can hold the
+/// output open long after the command itself exited. So once the child is gone, stop at
+/// EOF, after `DRAIN_IDLE` of quiet, or at `DRAIN_MAX`, whichever comes first. The
+/// reader thread is left behind; it ends with the process.
+fn pump(rx: &mpsc::Receiver<Vec<u8>>, child: &mut std::process::Child) -> Result<(Vec<u8>, ExitStatus)> {
     let mut stdout = std::io::stdout();
     let mut captured = Vec::new();
-    for chunk in rx {
-        captured.extend_from_slice(&chunk);
-        let _ = stdout.write_all(&chunk);
-        let _ = stdout.flush();
+    let mut exited: Option<(ExitStatus, Instant)> = None;
+    let mut last_output = Instant::now();
+    loop {
+        match rx.recv_timeout(POLL) {
+            Ok(chunk) => {
+                captured.extend_from_slice(&chunk);
+                let _ = stdout.write_all(&chunk);
+                let _ = stdout.flush();
+                last_output = Instant::now();
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // EOF: everything was read
+        }
+        match exited {
+            None => {
+                if let Some(status) = child.try_wait()? {
+                    exited = Some((status, Instant::now()));
+                    // Give output written just before the exit time to arrive.
+                    last_output = Instant::now();
+                }
+            }
+            Some((_, at)) => {
+                if last_output.elapsed() >= DRAIN_IDLE || at.elapsed() >= DRAIN_MAX {
+                    break;
+                }
+            }
+        }
     }
-    captured
+    let status = match exited {
+        Some((status, _)) => status,
+        None => child.wait()?,
+    };
+    Ok((captured, status))
 }
 
 /// Split an exit status into (exit code, signal name, shell-style status). A command
@@ -141,8 +182,7 @@ fn run_piped(argv: &[String]) -> Result<Recorded> {
     // `Command` keeps its copies of the pipe's write end: drop them, or EOF never arrives.
     drop(cmd);
 
-    let output = relay(spawn_reader(reader));
-    let status = child.wait()?;
+    let (output, status) = pump(&spawn_reader(reader), &mut child)?;
     Ok(recorded(output, status_parts(status), started_at, start))
 }
 
@@ -190,8 +230,7 @@ fn run_in_pty(argv: &[String]) -> Result<Recorded> {
         }
     });
 
-    let output = relay(rx);
-    let status = child.wait()?;
+    let (output, status) = pump(&rx, child)?;
     drop(raw); // restore cooked mode before we print anything else
     Ok(recorded(output, status_parts(status), started_at, start))
 }
