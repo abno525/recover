@@ -1,4 +1,4 @@
-<p align="center">
+<p>
   <img src="assets/logo.svg" alt="recover" height="80">
 </p>
 
