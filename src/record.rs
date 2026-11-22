@@ -113,15 +113,23 @@ fn pump(
     let mut exited: Option<(ExitStatus, Instant)> = None;
     let mut last_output = Instant::now();
     let mut blocked_after_exit = Duration::ZERO;
+    let mut stdout_open = true;
     loop {
         match rx.recv_timeout(POLL) {
             Ok(chunk) => {
                 captured.push(&chunk);
-                let writing = Instant::now();
-                let _ = stdout.write_all(&chunk);
-                let _ = stdout.flush();
-                if exited.is_some() {
-                    blocked_after_exit += writing.elapsed();
+                if stdout_open {
+                    let writing = Instant::now();
+                    let written = stdout.write_all(&chunk).and_then(|()| stdout.flush());
+                    if written.is_err_and(|e| e.kind() == ErrorKind::BrokenPipe) {
+                        // Whoever read our output is gone (`r yes | head -1`): end the
+                        // command the way a plain pipeline would, and keep recording.
+                        stdout_open = false;
+                        send_sigpipe(child.id());
+                    }
+                    if exited.is_some() {
+                        blocked_after_exit += writing.elapsed();
+                    }
                 }
                 last_output = Instant::now();
             }
@@ -151,6 +159,18 @@ fn pump(
         None => child.wait()?,
     };
     Ok((captured.finish(), status))
+}
+
+/// Send SIGPIPE to the command: its whole process group when it leads one (the PTY path,
+/// where it is a session leader), else just the process.
+fn send_sigpipe(pid: u32) {
+    let pid = pid as libc::pid_t;
+    // SAFETY: plain kill(2) calls; a failure only means there was nothing to signal.
+    unsafe {
+        if libc::kill(-pid, libc::SIGPIPE) != 0 {
+            libc::kill(pid, libc::SIGPIPE);
+        }
+    }
 }
 
 /// Split an exit status into (exit code, signal name, shell-style status). A command

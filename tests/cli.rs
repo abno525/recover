@@ -279,6 +279,40 @@ fn ctrl_c_with_piped_stdin_still_records_the_run() {
 }
 
 #[test]
+fn a_closed_stdout_ends_the_command_like_a_pipeline() {
+    use std::io::Read;
+    let db = tmp_db("epipe");
+    let mut cmd = recover_cmd(&db, &cfg_path("absent"), &["run", "--", "yes"]);
+    let mut child = cmd.stdout(Stdio::piped()).spawn().unwrap();
+    let mut buf = [0u8; 16];
+    child.stdout.take().unwrap().read_exact(&mut buf).unwrap(); // then hang up, like `head`
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("recover kept running after its reader went away");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(141), "128 + SIGPIPE, as a shell pipeline reports");
+    let show = stdout(&run(&db, &["show", "1"]));
+    assert!(show.contains("status:   Broken pipe"), "show was: {show}");
+}
+
+#[test]
+fn a_closed_stdout_ends_the_command_in_a_pty_too() {
+    let db = tmp_db("epipe-tty");
+    let line = format!("'{}' run -- yes | head -1", bin());
+    let Some(out) = run_in_tty(&db, &line, 10) else { return };
+    assert!(out.status.success(), "script stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let show = stdout(&run(&db, &["show", "1"]));
+    assert!(show.contains("status:   Broken pipe"), "show was: {show}");
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);

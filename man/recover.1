@@ -70,6 +70,9 @@ Recording ends when the command exits. A background job it started (\fBserver &\
 waited for: output that arrives within a moment of the exit is still recorded, then recover
 stops listening, and the job loses its output (it gets an error or a hangup on its next
 write).
+.PP
+If whatever reads recover's output goes away (\fBr yes | head \-1\fR), the command gets
+SIGPIPE as it would in a plain pipeline, and the run is still recorded.
 .SH QUERYING
 Every run action can be written id\-first (\fBrecover 42 out\fR) or verb\-first
 (\fBrecover out 42\fR).
