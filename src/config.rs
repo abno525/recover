@@ -190,15 +190,23 @@ pub fn ensure_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// True for a regular file that group or others can access.
+#[cfg(unix)]
+fn loosely_permitted(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.is_file() && meta.permissions().mode() & 0o077 != 0
+}
+
 /// Make sure `path` exists and only its owner can read it: create it 0600, or tighten an
-/// existing file that group/others can access. Run history holds every recorded command
-/// line and its output, so it gets the same treatment as a shell history file.
+/// existing regular file that group/others can access (anything else, such as a
+/// directory, is left alone). Run history holds every recorded command line and its
+/// output, so it gets the same treatment as a shell history file.
 pub fn ensure_private_file(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         match std::fs::metadata(path) {
-            Ok(meta) if meta.permissions().mode() & 0o077 != 0 => {
+            Ok(meta) if loosely_permitted(&meta) => {
                 // Best effort: a file we can open but don't own stays usable.
                 let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
             }
@@ -218,6 +226,23 @@ pub fn ensure_private_file(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+/// Create (or truncate) `path` for writing, private like [`ensure_private_file`]. The file
+/// is opened first, so a path that cannot be written (a directory, say) fails before any
+/// permissions change.
+pub fn create_private(path: &Path) -> Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let file = opts.open(path).with_context(|| format!("creating {}", path.display()))?;
+    #[cfg(unix)]
+    if file.metadata().is_ok_and(|m| loosely_permitted(&m)) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

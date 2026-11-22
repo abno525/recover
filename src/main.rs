@@ -386,8 +386,7 @@ fn cmd_export(rest: &[String]) -> Result<i32> {
     let json = serde_json::to_string_pretty(&exported)?;
     match file {
         Some(path) => {
-            config::ensure_private_file(std::path::Path::new(path))?;
-            std::fs::write(path, json)?;
+            config::create_private(std::path::Path::new(path))?.write_all(json.as_bytes())?;
             eprintln!("exported {} runs to {path}", exported.len());
         }
         None => println!("{json}"),

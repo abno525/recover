@@ -625,6 +625,33 @@ fn an_export_file_is_private() {
 }
 
 #[test]
+fn exporting_to_a_directory_fails_without_touching_its_mode() {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("recover-it-{}-export-dir", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let db = tmp_db("export-dir");
+    let out = run(&db, &["export", dir.to_str().unwrap()]);
+    assert!(!out.status.success(), "exporting onto a directory must fail");
+    assert_eq!(mode(&dir), 0o755, "the directory's mode must be left alone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_database_path_that_is_a_directory_is_not_chmodded() {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("recover-it-{}-db-dir", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = run(&dir, &[]);
+    assert!(!out.status.success());
+    assert_eq!(mode(&dir), 0o755, "the directory's mode must be left alone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn db_path_reports_the_override() {
     let db = tmp_db("dbpath");
     let out = run(&db, &["db", "path"]);
