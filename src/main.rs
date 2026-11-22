@@ -18,6 +18,13 @@ const RESERVED: &[&str] = &[
 ];
 
 fn main() {
+    // Rust ignores SIGPIPE, which turns `recover show 5 | head` into a "failed printing to
+    // stdout" panic. Take the default back so queries just stop when their reader goes
+    // away, like any other command. (`run` ignores it again: it handles that case itself.)
+    // SAFETY: setting a signal disposition before any other thread exists.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     match real_main() {
         Ok(code) => std::process::exit(code),
         Err(e) => {

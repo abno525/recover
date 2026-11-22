@@ -313,6 +313,24 @@ fn a_closed_stdout_ends_the_command_in_a_pty_too() {
 }
 
 #[test]
+fn piping_a_query_into_head_ends_quietly() {
+    use std::io::Read;
+    use std::os::unix::process::ExitStatusExt;
+    let db = tmp_db("query-epipe");
+    run(&db, &["run", "--", "seq", "1", "100000"]);
+    for args in [&["show", "1"][..], &["out", "1"][..]] {
+        let mut cmd = recover_cmd(&db, &cfg_path("absent"), args);
+        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut buf = [0u8; 16];
+        child.stdout.take().unwrap().read_exact(&mut buf).unwrap(); // then hang up, like `head`
+        let out = child.wait_with_output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.is_empty(), "{args:?} printed to stderr: {err}");
+        assert_eq!(out.status.signal(), Some(13), "{args:?} should end by SIGPIPE: {:?}", out.status);
+    }
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);

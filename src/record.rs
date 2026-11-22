@@ -55,6 +55,12 @@ fn tty_size() -> Option<(u16, u16)> {
 /// stderr combined, at most `max_output` bytes of it (0 = all; see [`Capture`]).
 pub fn run_command(argv: &[String], max_output: usize) -> Result<Recorded> {
     anyhow::ensure!(!argv.is_empty(), "no command given");
+    // A closed stdout must come back as a write error, so the relay can stop and end the
+    // command with SIGPIPE itself, then still record the run.
+    // SAFETY: changes only this process's SIGPIPE disposition (children get the default).
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     let capture = Capture::new(max_output);
     if std::io::stdin().is_terminal() {
         run_in_pty(argv, capture)
