@@ -41,9 +41,10 @@ impl Capture {
         }
     }
 
-    /// The captured bytes. When anything was dropped, both halves are cut back to whole
-    /// lines (so the cut never splits a character or an escape sequence) and a
-    /// `[recover: N bytes omitted]` line marks the gap.
+    /// The captured bytes. When anything was dropped, a `[recover: N bytes omitted]` line
+    /// marks the gap, and both halves are cut back to whole lines, so the cut never splits
+    /// a character or an escape sequence. Output without newlines (binary data, progress
+    /// bars) is instead cut at a character boundary clear of any escape sequence.
     pub fn finish(self) -> Vec<u8> {
         let Capture { mut head, tail, mut omitted, .. } = self;
         let mut tail = Vec::from(tail);
@@ -51,14 +52,18 @@ impl Capture {
             head.extend_from_slice(&tail);
             return head;
         }
-        if let Some(i) = head.iter().rposition(|&b| b == b'\n') {
-            omitted += (head.len() - (i + 1)) as u64;
-            head.truncate(i + 1);
-        }
-        if let Some(i) = tail.iter().position(|&b| b == b'\n') {
-            omitted += (i + 1) as u64;
-            tail.drain(..=i);
-        }
+        let head_end = match head.iter().rposition(|&b| b == b'\n') {
+            Some(i) => i + 1,
+            None => clean_end(&head),
+        };
+        omitted += (head.len() - head_end) as u64;
+        head.truncate(head_end);
+        let tail_start = match tail.iter().position(|&b| b == b'\n') {
+            Some(i) => i + 1,
+            None => clean_start(&tail),
+        };
+        omitted += tail_start as u64;
+        tail.drain(..tail_start);
         if !head.is_empty() && !head.ends_with(b"\n") {
             head.push(b'\n');
         }
@@ -66,6 +71,61 @@ impl Capture {
         head.extend_from_slice(&tail);
         head
     }
+}
+
+/// How far back an unfinished escape sequence is looked for at a cut.
+const ESCAPE_WINDOW: usize = 32;
+
+/// Where to end `b` so it stops neither inside an escape sequence nor inside a character.
+fn clean_end(b: &[u8]) -> usize {
+    let from = b.len().saturating_sub(ESCAPE_WINDOW);
+    let mut end = b.len();
+    if let Some(esc) = b[from..].iter().rposition(|&c| c == 0x1b).map(|i| from + i)
+        && !escape_finished(&b[esc..])
+    {
+        end = esc;
+    }
+    char_floor(&b[..end])
+}
+
+/// Where to start `b` so it begins neither inside an escape sequence nor inside a
+/// character: at an escape that shows up early (the bytes before it may be the end of a
+/// cut one), else at the first character start.
+fn clean_start(b: &[u8]) -> usize {
+    let window = &b[..b.len().min(ESCAPE_WINDOW)];
+    match window.iter().position(|&c| c == 0x1b) {
+        Some(esc) => esc,
+        None => b.iter().position(|&c| c & 0xC0 != 0x80).unwrap_or(b.len()),
+    }
+}
+
+/// Whether the escape sequence at the start of `seq` (which begins with ESC) is complete.
+fn escape_finished(seq: &[u8]) -> bool {
+    match seq.get(1) {
+        None => false,
+        // CSI: parameters, then a final byte in 0x40..=0x7E.
+        Some(b'[') => seq[2..].iter().any(|c| (0x40..=0x7e).contains(c)),
+        // OSC: ends with BEL or ESC \.
+        Some(b']') => seq.contains(&0x07) || seq.windows(2).any(|w| w == b"\x1b\\"),
+        Some(_) => true,
+    }
+}
+
+/// The length of `b` without a trailing incomplete UTF-8 character.
+fn char_floor(b: &[u8]) -> usize {
+    let n = b.len();
+    let mut lead = n;
+    while lead > 0 && n - lead < 4 && b[lead - 1] & 0xC0 == 0x80 {
+        lead -= 1;
+    }
+    let Some(lead) = lead.checked_sub(1) else { return n };
+    let width = match b[lead] {
+        0xF0.. => 4,
+        0xE0.. => 3,
+        0xC0.. => 2,
+        _ => 1,
+    };
+    if n - lead >= width { n } else { lead }
 }
 
 #[cfg(test)]
@@ -119,6 +179,26 @@ mod tests {
                 line.starts_with("[recover: ") || line.parse::<u32>().is_ok(),
                 "partial line {line:?} in {got:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_cut_without_newlines_never_splits_a_character() {
+        let data = "aé".repeat(200).into_bytes(); // 1- and 2-byte characters, no newlines
+        for limit in 4..60 {
+            let got = capture(limit, &[&data]);
+            assert!(String::from_utf8(got.clone()).is_ok(), "limit {limit}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn a_cut_without_newlines_never_splits_an_escape_sequence() {
+        let data = "\x1b[31mred\x1b[0m ".repeat(50).into_bytes(); // colored words, no newlines
+        for limit in 16..80 {
+            let shown = crate::text::decode_lossy_stripped(&capture(limit, &[&data]));
+            assert!(shown.contains("[recover: ") && shown.contains(" bytes omitted]\n"), "limit {limit}: {shown:?}");
+            let text: String = shown.lines().filter(|l| !l.starts_with("[recover: ")).collect();
+            assert!(text.chars().all(|c| "red ".contains(c)), "limit {limit}: fragments in {shown:?}");
         }
     }
 
