@@ -184,7 +184,7 @@ fn run_and_record(command_str: String, argv: &[String]) -> Result<i32> {
         finished_at: rec.finished_at,
         duration_ms: rec.duration_ms,
         cwd: std::env::current_dir().ok().map(|p| p.display().to_string()),
-        host: std::env::var("HOSTNAME").ok(),
+        host: hostname(),
         shell: std::env::var("SHELL").ok(),
         comment: None,
     };
@@ -452,6 +452,20 @@ fn cmd_config(rest: &[String]) -> Result<i32> {
 }
 
 // ---- helpers --------------------------------------------------------------
+
+/// The machine's hostname. `$HOSTNAME` is not used: bash sets it but usually does not
+/// export it, so child processes rarely see it.
+fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is valid for writes of `buf.len()` bytes; gethostname writes at most that.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..end]).into_owned();
+    (!name.is_empty()).then_some(name)
+}
 
 fn shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())

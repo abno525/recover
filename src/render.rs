@@ -172,6 +172,9 @@ pub fn format_show(run: &Run, output: &[u8]) -> String {
     if let Some(cwd) = &run.cwd {
         out.push_str(&format!("cwd:      {cwd}\n"));
     }
+    if let Some(host) = &run.host {
+        out.push_str(&format!("host:     {host}\n"));
+    }
     if let Some(comment) = &run.comment {
         out.push_str(&format!("comment:  {comment}\n"));
     }

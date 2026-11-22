@@ -163,6 +163,16 @@ fn a_day_without_a_midnight_starts_at_its_first_valid_time() {
 }
 
 #[test]
+fn show_reports_the_real_hostname() {
+    let db = tmp_db("host");
+    // $HOSTNAME is a bash variable that is usually not exported; never trust it.
+    run_env(&db, &[("HOSTNAME", "not-the-real-host")], &["run", "--", "true"]);
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+    let show = stdout(&run(&db, &["show", "1"]));
+    assert!(show.contains(&format!("host:     {}\n", host.trim())), "show was: {show}");
+}
+
+#[test]
 fn rerun_creates_a_second_record() {
     let db = tmp_db("rerun");
     run(&db, &["run", "--", "echo", "again"]);

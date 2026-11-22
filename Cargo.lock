@@ -513,6 +513,7 @@ dependencies = [
  "base64",
  "chrono",
  "crossterm",
+ "libc",
  "minus",
  "portable-pty",
  "regex",
