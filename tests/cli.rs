@@ -192,6 +192,33 @@ fn export_then_import_round_trips() {
 }
 
 #[test]
+fn an_import_with_a_bad_record_imports_nothing() {
+    let db = tmp_db("import-bad");
+    let out = import_runs(
+        &db,
+        "import-bad",
+        &[(1, "echo good-one", "2026-09-18T20:00:00.000Z"), (2, "echo bad-one", "not-a-date")],
+    );
+    assert!(!out.status.success(), "a bad record must fail the import");
+    let list = stdout(&run(&db, &[]));
+    assert!(!list.contains("echo good-one"), "nothing may be imported: {list}");
+}
+
+#[test]
+fn export_clear_import_keeps_the_newest_run_last() {
+    let db = tmp_db("import-order");
+    run(&db, &["run", "--", "echo", "first"]);
+    run(&db, &["run", "--", "echo", "second"]);
+    let mut json = std::env::temp_dir();
+    json.push(format!("recover-it-{}-import-order.json", std::process::id()));
+    run(&db, &["export", json.to_str().unwrap()]);
+    run(&db, &["clear", "--yes"]);
+    run(&db, &["import", json.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&json);
+    assert_eq!(stdout(&run(&db, &["cmd", "-1"])), "echo second\n", "-1 must be the newest run");
+}
+
+#[test]
 fn standard_mode_disables_shortcuts() {
     let db = tmp_db("stdmode");
     run(&db, &["run", "--", "echo", "hi"]);

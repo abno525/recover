@@ -401,11 +401,14 @@ fn cmd_import(rest: &[String]) -> Result<i32> {
         .find(|a| a.as_str() != "--json")
         .ok_or_else(|| anyhow::anyhow!("usage: recover import <file.json>"))?;
     let json = std::fs::read_to_string(path)?;
-    let records: Vec<ExportRun> = serde_json::from_str(&json)?;
-    let db = open_db()?;
-    let mut n = 0;
+    let mut records: Vec<ExportRun> = serde_json::from_str(&json)?;
+    // Exports list newest first; insert oldest first so new ids keep the original order.
+    records.sort_by_key(|r| r.id);
+    // Decode every record before touching the database, then insert them all at once:
+    // a bad record aborts the import with nothing added.
+    let mut runs = Vec::with_capacity(records.len());
     for r in records {
-        let new = NewRun {
+        runs.push(NewRun {
             command: r.command,
             output: BASE64_STANDARD.decode(r.output_b64.as_bytes())?,
             exit_code: r.exit_code,
@@ -417,10 +420,9 @@ fn cmd_import(rest: &[String]) -> Result<i32> {
             host: r.host,
             shell: r.shell,
             comment: r.comment,
-        };
-        db.insert(&new)?;
-        n += 1;
+        });
     }
+    let n = open_db()?.insert_all(&runs)?;
     eprintln!("imported {n} runs");
     Ok(0)
 }

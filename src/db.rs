@@ -82,6 +82,28 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn insert_on(conn: &Connection, run: &NewRun) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO runs \
+         (command, output, exit_code, signal, started_at, finished_at, duration_ms, cwd, host, shell, comment) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            run.command,
+            run.output,
+            run.exit_code,
+            run.signal,
+            fmt_ts(run.started_at),
+            fmt_ts(run.finished_at),
+            run.duration_ms,
+            run.cwd,
+            run.host,
+            run.shell,
+            run.comment,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 impl Db {
     /// Open (creating if needed) the database at `path` and apply migrations.
     pub fn open(path: &Path) -> Result<Db> {
@@ -100,25 +122,17 @@ impl Db {
 
     /// Insert a run, returning its assigned id.
     pub fn insert(&self, run: &NewRun) -> Result<i64> {
-        self.conn.execute(
-            "INSERT INTO runs \
-             (command, output, exit_code, signal, started_at, finished_at, duration_ms, cwd, host, shell, comment) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                run.command,
-                run.output,
-                run.exit_code,
-                run.signal,
-                fmt_ts(run.started_at),
-                fmt_ts(run.finished_at),
-                run.duration_ms,
-                run.cwd,
-                run.host,
-                run.shell,
-                run.comment,
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        insert_on(&self.conn, run)
+    }
+
+    /// Insert runs in order, all or nothing (one transaction). Returns how many were added.
+    pub fn insert_all(&self, runs: &[NewRun]) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        for run in runs {
+            insert_on(&tx, run)?;
+        }
+        tx.commit()?;
+        Ok(runs.len())
     }
 
     /// Fetch a run by id.

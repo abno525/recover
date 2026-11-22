@@ -159,7 +159,8 @@ Use \fB+\fR for the future (\fBdate:+3day\fR).
 Write all runs as JSON (to \fIFILE\fR, else stdout). Output is base64\-encoded to stay lossless.
 .TP
 .B recover import \fIFILE\fR
-Load runs from a JSON export, appending them.
+Load runs from a JSON export, appending them in their original order (they get new ids).
+The import is all or nothing: if any record is invalid, no runs are added.
 .TP
 .B recover db path
 Print the database file path (copy that one file to move your history).
