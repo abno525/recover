@@ -1,4 +1,6 @@
-# recover
+<p align="center">
+  <img src="assets/logo.svg" alt="recover" height="80">
+</p>
 
 Taskwarrior inspired recorder for commands and their output.
 
