@@ -28,14 +28,43 @@ fn run(db: &PathBuf, args: &[&str]) -> Output {
     run_cfg(db, &none, args)
 }
 
-fn run_cfg(db: &PathBuf, config: &PathBuf, args: &[&str]) -> Output {
-    Command::new(bin())
-        .args(args)
+fn recover_cmd(db: &PathBuf, config: &PathBuf, args: &[&str]) -> Command {
+    let mut c = Command::new(bin());
+    c.args(args)
         .env("RECOVER_DB", db)
         .env("RECOVER_CONFIG", config)
-        .stdin(Stdio::null())
-        .output()
-        .expect("failed to execute recover")
+        .stdin(Stdio::null());
+    c
+}
+
+fn run_cfg(db: &PathBuf, config: &PathBuf, args: &[&str]) -> Output {
+    recover_cmd(db, config, args).output().expect("failed to execute recover")
+}
+
+/// Like [`run`], with extra environment variables (e.g. `TZ`).
+fn run_env(db: &PathBuf, env: &[(&str, &str)], args: &[&str]) -> Output {
+    let none = cfg_path("absent");
+    let mut c = recover_cmd(db, &none, args);
+    c.envs(env.iter().copied());
+    c.output().expect("failed to execute recover")
+}
+
+/// Write an export-format JSON file holding `(id, command, started_at)` runs and import it.
+fn import_runs(db: &PathBuf, name: &str, runs: &[(i64, &str, &str)]) -> Output {
+    let rows: Vec<String> = runs
+        .iter()
+        .map(|(id, cmd, start)| {
+            format!(
+                r#"{{"id":{id},"command":"{cmd}","output_b64":"","exit_code":0,"signal":null,"started_at":"{start}","finished_at":"{start}","duration_ms":0,"cwd":null,"host":null,"shell":null}}"#
+            )
+        })
+        .collect();
+    let mut json = std::env::temp_dir();
+    json.push(format!("recover-it-{}-{name}.import.json", std::process::id()));
+    std::fs::write(&json, format!("[{}]", rows.join(","))).unwrap();
+    let out = run(db, &["import", json.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&json);
+    out
 }
 
 fn stdout(o: &Output) -> String {
@@ -99,6 +128,37 @@ fn date_window_filters() {
     // a window starting tomorrow excludes it (only the header row remains)
     let future = stdout(&run(&db, &["date:tomorrow"]));
     assert!(!future.contains("echo now-ish"), "future listing: {future}");
+}
+
+#[test]
+fn date_anchors_follow_local_time() {
+    let db = tmp_db("localtz");
+    // 20:00Z on the 18th is 06:00 on the 19th in Brisbane (UTC+10, no DST).
+    import_runs(&db, "localtz", &[(1, "echo early-morning", "2026-09-18T20:00:00.000Z")]);
+    let tz = [("TZ", "Australia/Brisbane")];
+    let on_19th = stdout(&run_env(&db, &tz, &["date:2026-09-19..2026-09-20"]));
+    assert!(on_19th.contains("echo early-morning"), "local 19th should include it: {on_19th}");
+    let on_18th = stdout(&run_env(&db, &tz, &["date:2026-09-18..2026-09-19"]));
+    assert!(!on_18th.contains("echo early-morning"), "local 18th should not: {on_18th}");
+}
+
+#[test]
+fn a_day_without_a_midnight_starts_at_its_first_valid_time() {
+    let db = tmp_db("dstgap");
+    // Santiago skips 00:00-01:00 on 2026-09-06 (-04 -> -03). The day starts 01:00 -03 = 04:00Z.
+    import_runs(
+        &db,
+        "dstgap",
+        &[
+            (1, "echo saturday-night", "2026-09-06T03:30:00.000Z"), // 23:30 on the 5th, local
+            (2, "echo sunday-early", "2026-09-06T04:30:00.000Z"),   // 01:30 on the 6th, local
+        ],
+    );
+    let out = run_env(&db, &[("TZ", "America/Santiago")], &["date:2026-09-06"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let list = stdout(&out);
+    assert!(list.contains("echo sunday-early"), "{list}");
+    assert!(!list.contains("echo saturday-night"), "{list}");
 }
 
 #[test]

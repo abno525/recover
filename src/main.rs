@@ -205,7 +205,7 @@ fn cmd_list(rest: &[String], browse_explicit: bool) -> Result<i32> {
     let browse = browse_explicit || rest.iter().any(|a| a == "-l");
     let filter_toks: Vec<String> = rest.iter().filter(|a| a.as_str() != "-l").cloned().collect();
     let mut filters =
-        filter::parse(&filter_toks, Utc::now(), cfg.shortcuts()).map_err(anyhow::Error::msg)?;
+        filter::parse(&filter_toks, chrono::Local::now(), cfg.shortcuts()).map_err(anyhow::Error::msg)?;
     // The quick table caps at the configured default; `-l`/`list` pull in every match to
     // scroll. A `limit:N` filter token overrides either way.
     if filters.limit.is_none() {

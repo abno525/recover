@@ -142,6 +142,13 @@ timestamps. An anchor may carry one arithmetic term, \fIanchor\fR\fB\(+-\fIN\fBu
 units \fBs min h day week month year\fR \(em e.g. \fBtoday-5day\fR, \fBnow-2h\fR,
 \fBtoday+1week\fR.
 .PP
+Dates use your local time zone (\fBTZ\fR), the same one the list shows: \fBtoday\fR,
+\fByesterday\fR, \fBtomorrow\fR and \fBYYYY-MM-DD\fR mean local midnight, and day/week/month/year
+steps move the calendar date, so they stay on midnight across daylight\-saving changes.
+Second/minute/hour steps move the exact instant. On a day whose midnight is skipped by a
+clock change, the day starts at its first valid local time. RFC3339 timestamps carry their
+own offset.
+.PP
 A bare duration with no anchor is a quick\-mode shorthand for minus\-from\-default: day/week/
 month/year units count from \fBtoday\fR (midnight), while second/minute/hour units count from
 \fBnow\fR. So \fBdate:3day\fR == \fBdate:today-3day\fR, but \fBdate:2h\fR == \fBdate:now-2h\fR.

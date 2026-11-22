@@ -1,10 +1,10 @@
-//! Parse taskwarrior-style date expressions into UTC instants.
+//! Parse taskwarrior-style date expressions into UTC instants (days are local).
 //!
 //! Grammar: `<anchor>` optionally followed by one arithmetic term `<±><N><unit>`.
 //! Anchors: `now`, `today`, `yesterday`, `tomorrow`, `YYYY-MM-DD`, RFC3339 datetime.
 //! Units: `s/sec`, `m/min`, `h/hour`, `d/day`, `w/week`, `mon/month`, `y/year`.
 
-use chrono::{DateTime, Duration, Months, NaiveDate, TimeDelta, Utc};
+use chrono::{DateTime, Days, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Utc};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -33,94 +33,125 @@ fn default_anchor_for_unit(unit: &str) -> &'static str {
 
 /// Parse a date expression into a UTC instant, relative to `now`.
 ///
+/// Day words and dates (`today`, `yesterday`, `2026-09-01`) mean midnight in `now`'s
+/// time zone, and day/week/month/year steps move the local calendar date, so day
+/// boundaries match the local times the list shows. Second/minute/hour steps move the
+/// instant itself.
+///
 /// When `shortcuts` is true, a bare duration (`3day`) or a leading-sign duration (`-3day`)
 /// is shorthand for the default anchor minus/plus that duration (`date:3day` ==
 /// `date:today-3day`; `date:2h` == `date:now-2h`). When false (standard mode), only
 /// explicit anchors are accepted.
-pub fn parse_instant(expr: &str, now: DateTime<Utc>, shortcuts: bool) -> Result<DateTime<Utc>, String> {
+pub fn parse_instant<Tz: TimeZone>(
+    expr: &str,
+    now: DateTime<Tz>,
+    shortcuts: bool,
+) -> Result<DateTime<Utc>, String> {
     let expr = expr.trim();
     if expr.is_empty() {
         return Err("empty date expression".into());
     }
-    if let Some(c) = term_re().captures(expr) {
+    let local = if let Some(c) = term_re().captures(expr) {
         let anchor = c.get(1).unwrap().as_str();
         let unit = c.get(4).unwrap().as_str();
         let base = if anchor.is_empty() {
             if !shortcuts {
                 return Err(format!("date `{expr}` needs an explicit anchor in standard mode (e.g. today{expr})"));
             }
-            parse_anchor(default_anchor_for_unit(unit), now)?
+            parse_anchor(default_anchor_for_unit(unit), &now)?
         } else {
-            parse_anchor(anchor, now)?
+            parse_anchor(anchor, &now)?
         };
         let sign: i64 = if &c[2] == "-" { -1 } else { 1 };
         let n: i64 = c[3].parse().map_err(|_| format!("number too large: {}", &c[3]))?;
-        apply_term(base, sign, n, unit)
+        apply_term(base, sign, n, unit)?
     } else if let Some(c) = bare_dur_re().captures(expr) {
         if !shortcuts {
             return Err(format!("bare duration `{expr}` needs quick mode; use e.g. today-{expr}"));
         }
         let n: i64 = c[1].parse().map_err(|_| format!("number too large: {}", &c[1]))?;
         let unit = c.get(2).unwrap().as_str();
-        let base = parse_anchor(default_anchor_for_unit(unit), now)?;
-        apply_term(base, -1, n, unit)
+        let base = parse_anchor(default_anchor_for_unit(unit), &now)?;
+        apply_term(base, -1, n, unit)?
     } else {
-        parse_anchor(expr, now)
-    }
+        parse_anchor(expr, &now)?
+    };
+    Ok(local.with_timezone(&Utc))
 }
 
-fn parse_anchor(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
-    let midnight = |d: DateTime<Utc>| d.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+/// The first valid local time at or after `naive`: `naive` itself unless a DST jump
+/// skips it (Santiago has no 00:00 on its spring-forward day), then the next half hour
+/// that exists. An ambiguous time (fall-back) resolves to its earlier instant.
+fn resolve_local<Tz: TimeZone>(tz: &Tz, naive: NaiveDateTime) -> Option<DateTime<Tz>> {
+    (0..=48i64).find_map(|step| {
+        let t = naive.checked_add_signed(TimeDelta::minutes(30 * step))?;
+        tz.from_local_datetime(&t).earliest()
+    })
+}
+
+fn local_midnight<Tz: TimeZone>(tz: &Tz, day: Option<NaiveDate>) -> Result<DateTime<Tz>, String> {
+    let day = day.ok_or("date out of range")?;
+    resolve_local(tz, day.and_time(NaiveTime::MIN)).ok_or_else(|| format!("no valid local time on {day}"))
+}
+
+fn parse_anchor<Tz: TimeZone>(s: &str, now: &DateTime<Tz>) -> Result<DateTime<Tz>, String> {
+    let tz = now.timezone();
+    let today = now.date_naive();
     match s {
-        "now" => Ok(now),
-        "today" => Ok(midnight(now)),
-        "yesterday" => Ok(midnight(now) - Duration::days(1)),
-        "tomorrow" => Ok(midnight(now) + Duration::days(1)),
+        "now" => Ok(now.clone()),
+        "today" => local_midnight(&tz, Some(today)),
+        "yesterday" => local_midnight(&tz, today.pred_opt()),
+        "tomorrow" => local_midnight(&tz, today.succ_opt()),
         _ => {
             if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                return Ok(d.and_hms_opt(0, 0, 0).unwrap().and_utc());
+                return local_midnight(&tz, Some(d));
             }
             if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-                return Ok(dt.with_timezone(&Utc));
+                return Ok(dt.with_timezone(&tz));
             }
             Err(format!("unrecognized date anchor: {s}"))
         }
     }
 }
 
-fn apply_term(base: DateTime<Utc>, sign: i64, n: i64, unit: &str) -> Result<DateTime<Utc>, String> {
+fn apply_term<Tz: TimeZone>(base: DateTime<Tz>, sign: i64, n: i64, unit: &str) -> Result<DateTime<Tz>, String> {
     let overflow = || "date arithmetic overflow".to_string();
-    let signed = sign.checked_mul(n).ok_or_else(overflow)?;
     let unit = unit.to_ascii_lowercase();
-    let dur = match unit.as_str() {
+
+    // Sub-day units move the instant.
+    let signed = sign.checked_mul(n).ok_or_else(overflow)?;
+    let instant_step = match unit.as_str() {
         "s" | "sec" | "secs" | "second" | "seconds" => Some(TimeDelta::try_seconds(signed)),
         "m" | "min" | "mins" | "minute" | "minutes" => Some(TimeDelta::try_minutes(signed)),
         "h" | "hr" | "hrs" | "hour" | "hours" => Some(TimeDelta::try_hours(signed)),
-        "d" | "day" | "days" => Some(TimeDelta::try_days(signed)),
-        "w" | "wk" | "wks" | "week" | "weeks" => Some(TimeDelta::try_weeks(signed)),
         _ => None,
     };
-    if let Some(dur) = dur {
-        return dur
-            .and_then(|d| base.checked_add_signed(d))
-            .ok_or_else(overflow);
+    if let Some(step) = instant_step {
+        return step.and_then(|d| base.checked_add_signed(d)).ok_or_else(overflow);
     }
-    let months_per = match unit.as_str() {
-        "mon" | "month" | "months" => 1,
-        "y" | "yr" | "yrs" | "year" | "years" => 12,
+
+    // Calendar units move the local wall-clock date, then resolve back to an instant.
+    let wall = base.naive_local();
+    let moved = match unit.as_str() {
+        "d" | "day" | "days" => shift_days(wall, sign, n),
+        "w" | "wk" | "wks" | "week" | "weeks" => n.checked_mul(7).and_then(|d| shift_days(wall, sign, d)),
+        "mon" | "month" | "months" => shift_months(wall, sign, n, 1),
+        "y" | "yr" | "yrs" | "year" | "years" => shift_months(wall, sign, n, 12),
         _ => return Err(format!("unrecognized time unit: {unit}")),
     };
-    let months = u32::try_from(n)
-        .ok()
-        .and_then(|n| n.checked_mul(months_per))
-        .map(Months::new)
-        .ok_or_else(overflow)?;
-    let res = if sign < 0 {
-        base.checked_sub_months(months)
-    } else {
-        base.checked_add_months(months)
-    };
-    res.ok_or_else(overflow)
+    moved
+        .and_then(|t| resolve_local(&base.timezone(), t))
+        .ok_or_else(overflow)
+}
+
+fn shift_days(t: NaiveDateTime, sign: i64, n: i64) -> Option<NaiveDateTime> {
+    let days = Days::new(u64::try_from(n).ok()?);
+    if sign < 0 { t.checked_sub_days(days) } else { t.checked_add_days(days) }
+}
+
+fn shift_months(t: NaiveDateTime, sign: i64, n: i64, per: u32) -> Option<NaiveDateTime> {
+    let months = Months::new(u32::try_from(n).ok()?.checked_mul(per)?);
+    if sign < 0 { t.checked_sub_months(months) } else { t.checked_add_months(months) }
 }
 
 #[cfg(test)]
@@ -236,6 +267,31 @@ mod tests {
         let now = at(2026, 9, 19, 14, 30, 0);
         // 4294967297 = 2^32 + 1; a plain `as u32` cast would turn it into 1 month.
         assert!(p("today-4294967297month", now).is_err());
+    }
+
+    /// A wall-clock time in a fixed UTC+2 zone.
+    fn plus2(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<chrono::FixedOffset> {
+        chrono::FixedOffset::east_opt(2 * 3600).unwrap().with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    }
+
+    #[test]
+    fn day_anchors_are_local_midnight() {
+        let now = plus2(2026, 9, 19, 0, 30); // 22:30Z on the 18th
+        let q = |e: &str| parse_instant(e, now, true).unwrap();
+        assert_eq!(q("today"), at(2026, 9, 18, 22, 0, 0));
+        assert_eq!(q("yesterday"), at(2026, 9, 17, 22, 0, 0));
+        assert_eq!(q("tomorrow"), at(2026, 9, 19, 22, 0, 0));
+        assert_eq!(q("2026-09-01"), at(2026, 8, 31, 22, 0, 0));
+        assert_eq!(q("today-1day"), at(2026, 9, 17, 22, 0, 0));
+        assert_eq!(q("3day"), at(2026, 9, 15, 22, 0, 0));
+        assert_eq!(q("today-1month"), at(2026, 8, 18, 22, 0, 0));
+    }
+
+    #[test]
+    fn hour_offsets_count_from_the_instant() {
+        let now = plus2(2026, 9, 19, 0, 30);
+        assert_eq!(parse_instant("now-2h", now, true).unwrap(), at(2026, 9, 18, 20, 30, 0));
+        assert_eq!(parse_instant("2h", now, true).unwrap(), at(2026, 9, 18, 20, 30, 0));
     }
 
     #[test]

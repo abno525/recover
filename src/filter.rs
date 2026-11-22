@@ -5,11 +5,11 @@
 
 use crate::model::Filters;
 use crate::timequery::parse_instant;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone};
 
 /// Parse filter tokens. `now` anchors relative date expressions; `shortcuts` allows the
 /// bare-duration date forms (`date:3day`) — disabled in standard mode.
-pub fn parse(tokens: &[String], now: DateTime<Utc>, shortcuts: bool) -> Result<Filters, String> {
+pub fn parse<Tz: TimeZone>(tokens: &[String], now: DateTime<Tz>, shortcuts: bool) -> Result<Filters, String> {
     let mut f = Filters::default();
     for tok in tokens {
         let (key, val) = tok
@@ -28,14 +28,14 @@ pub fn parse(tokens: &[String], now: DateTime<Utc>, shortcuts: bool) -> Result<F
             }
             "date" => {
                 if let Some((a, b)) = val.split_once("..") {
-                    f.after = Some(parse_instant(a, now, shortcuts)?);
-                    f.before = Some(parse_instant(b, now, shortcuts)?);
+                    f.after = Some(parse_instant(a, now.clone(), shortcuts)?);
+                    f.before = Some(parse_instant(b, now.clone(), shortcuts)?);
                 } else {
-                    f.after = Some(parse_instant(val, now, shortcuts)?);
+                    f.after = Some(parse_instant(val, now.clone(), shortcuts)?);
                 }
             }
-            "date.after" => f.after = Some(parse_instant(val, now, shortcuts)?),
-            "date.before" => f.before = Some(parse_instant(val, now, shortcuts)?),
+            "date.after" => f.after = Some(parse_instant(val, now.clone(), shortcuts)?),
+            "date.before" => f.before = Some(parse_instant(val, now.clone(), shortcuts)?),
             other => return Err(format!("unknown filter key: {other}")),
         }
     }
@@ -45,7 +45,7 @@ pub fn parse(tokens: &[String], now: DateTime<Utc>, shortcuts: bool) -> Result<F
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 19, 14, 30, 0).unwrap()
