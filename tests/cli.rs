@@ -256,6 +256,29 @@ fn a_slow_reader_still_gets_all_the_output() {
 }
 
 #[test]
+fn ctrl_c_with_piped_stdin_still_records_the_run() {
+    use std::os::unix::process::CommandExt;
+    let db = tmp_db("sigint-pipe");
+    let script = "trap 'echo cleanup; exit 130' INT; echo started; while :; do sleep 0.1; done";
+    let mut cmd = recover_cmd(&db, &cfg_path("absent"), &["run", "--", "sh", "-c", script]);
+    // Own process group, so the SIGINT below reaches recover and the command together,
+    // as a terminal's Ctrl-C does.
+    let child = cmd.process_group(0).stdout(Stdio::piped()).spawn().unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        let _ = Command::new("kill").args(["-9", "--", &format!("-{pid}")]).status();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    Command::new("kill").args(["-INT", "--", &format!("-{pid}")]).status().unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(130), "recover exits with the command's status");
+    assert!(stdout(&out).contains("cleanup"), "the trap's output is shown: {:?}", stdout(&out));
+    let show = stdout(&run(&db, &["show", "1"]));
+    assert!(show.contains("status:   130") && show.contains("cleanup"), "show was: {show}");
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);

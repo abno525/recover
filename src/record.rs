@@ -191,8 +191,28 @@ fn recorded(
     }
 }
 
+/// Let Ctrl-C/Ctrl-\ from the terminal reach the command without killing recover, as
+/// system(3) does: the command decides how to react, and recover still records the run.
+/// A no-op handler rather than SIG_IGN, because handlers reset to the default on exec
+/// while an ignored signal would stay ignored in the command.
+fn survive_terminal_interrupts() {
+    extern "C" fn noop(_: libc::c_int) {}
+    // SAFETY: installs an async-signal-safe (empty) handler; the struct is zeroed and then
+    // fully initialized before use.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = noop as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGQUIT, &sa, std::ptr::null_mut());
+    }
+}
+
 /// No terminal on stdin: inherit stdin, capture stdout+stderr through one pipe.
 fn run_piped(argv: &[String], capture: Capture) -> Result<Recorded> {
+    // (In the PTY path raw mode turns Ctrl-C into a byte for the command instead.)
+    survive_terminal_interrupts();
     let (reader, writer) = std::io::pipe()?;
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).stdout(writer.try_clone()?).stderr(writer);
