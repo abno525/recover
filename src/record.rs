@@ -1,16 +1,19 @@
-//! Run a command inside a pseudo-terminal, relaying I/O live while capturing output.
+//! Run a command, relaying its output live while capturing it.
 //!
-//! The child runs attached to a PTY so it behaves as if run directly in the terminal
-//! (colors, interactive TUIs). Output is teed to our stdout and an in-memory buffer.
+//! With a terminal on stdin the command runs in a pseudo-terminal, so it behaves as if run
+//! directly in the terminal (colors, interactive TUIs) and keystrokes are forwarded to it.
+//! With piped or redirected input it runs without one: stdin passes straight through and
+//! stdout+stderr are captured from a pipe, so programs may turn their colors off.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::io::{IsTerminal, Read, Write};
-use std::sync::{Arc, Mutex};
+use std::io::{ErrorKind, IsTerminal, Read, Write};
+use std::os::unix::process::ExitStatusExt;
+use std::sync::mpsc;
 use std::time::Instant;
 
-/// The result of running a command in a PTY.
+/// The result of running a command.
 pub struct Recorded {
     pub output: Vec<u8>,
     pub exit_code: Option<i32>,
@@ -21,23 +24,17 @@ pub struct Recorded {
 }
 
 /// Restores terminal cooked mode on drop.
-struct RawGuard(bool);
+struct RawGuard;
 
 impl RawGuard {
-    fn enable() -> RawGuard {
-        if std::io::stdin().is_terminal() && crossterm::terminal::enable_raw_mode().is_ok() {
-            RawGuard(true)
-        } else {
-            RawGuard(false)
-        }
+    fn enable() -> Option<RawGuard> {
+        crossterm::terminal::enable_raw_mode().ok().map(|()| RawGuard)
     }
 }
 
 impl Drop for RawGuard {
     fn drop(&mut self) {
-        if self.0 {
-            let _ = crossterm::terminal::disable_raw_mode();
-        }
+        let _ = crossterm::terminal::disable_raw_mode();
     }
 }
 
@@ -48,13 +45,88 @@ fn terminal_dims() -> (u16, u16) {
     }
 }
 
-/// Execute `argv` (program + args) in a PTY, streaming live and capturing combined output.
-pub fn run_in_pty(argv: &[String]) -> Result<Recorded> {
+/// Execute `argv` (program + args), streaming its output live and capturing stdout and
+/// stderr combined.
+pub fn run_command(argv: &[String]) -> Result<Recorded> {
     anyhow::ensure!(!argv.is_empty(), "no command given");
+    if std::io::stdin().is_terminal() {
+        run_in_pty(argv)
+    } else {
+        run_piped(argv)
+    }
+}
 
-    let pty_system = native_pty_system();
+/// Read `reader` to EOF on its own thread, sending each chunk to the returned channel.
+fn spawn_reader(mut reader: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(chunk[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
+/// Copy every chunk to our stdout and keep it, until the reader reaches EOF.
+fn relay(rx: mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    let mut stdout = std::io::stdout();
+    let mut captured = Vec::new();
+    for chunk in rx {
+        captured.extend_from_slice(&chunk);
+        let _ = stdout.write_all(&chunk);
+        let _ = stdout.flush();
+    }
+    captured
+}
+
+fn recorded(
+    output: Vec<u8>,
+    (exit_code, signal): (Option<i32>, Option<String>),
+    started_at: DateTime<Utc>,
+    start: Instant,
+) -> Recorded {
+    Recorded {
+        output,
+        exit_code,
+        signal,
+        started_at,
+        finished_at: Utc::now(),
+        duration_ms: start.elapsed().as_millis() as i64,
+    }
+}
+
+/// No terminal on stdin: inherit stdin, capture stdout+stderr through one pipe.
+fn run_piped(argv: &[String]) -> Result<Recorded> {
+    let (reader, writer) = std::io::pipe()?;
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]).stdout(writer.try_clone()?).stderr(writer);
+
+    let started_at = Utc::now();
+    let start = Instant::now();
+    let mut child = cmd.spawn().with_context(|| format!("failed to start `{}`", argv[0]))?;
+    // `Command` keeps its copies of the pipe's write end: drop them, or EOF never arrives.
+    drop(cmd);
+
+    let output = relay(spawn_reader(reader));
+    let status = child.wait()?;
+    let parts = (status.code(), status.signal().map(|n| format!("signal {n}")));
+    Ok(recorded(output, parts, started_at, start))
+}
+
+/// A terminal on stdin: run in a PTY, forwarding keystrokes in raw mode.
+fn run_in_pty(argv: &[String]) -> Result<Recorded> {
     let (cols, rows) = terminal_dims();
-    let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+    let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 
     let mut cmd = CommandBuilder::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -71,66 +143,32 @@ pub fn run_in_pty(argv: &[String]) -> Result<Recorded> {
     // Drop the slave in the parent so the master sees EOF once the child exits.
     drop(pair.slave);
 
-    // Reader thread: PTY master -> our stdout + capture buffer.
-    let buffer = Arc::new(Mutex::new(Vec::new()));
-    let mut reader = pair.master.try_clone_reader()?;
-    let buf = Arc::clone(&buffer);
-    let reader_thread = std::thread::spawn(move || {
-        let mut stdout = std::io::stdout();
+    let rx = spawn_reader(pair.master.try_clone_reader()?);
+    let raw = RawGuard::enable();
+    let mut writer = pair.master.take_writer()?;
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
         let mut chunk = [0u8; 8192];
         loop {
-            match reader.read(&mut chunk) {
+            match stdin.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let _ = stdout.write_all(&chunk[..n]);
-                    let _ = stdout.flush();
-                    if let Ok(mut b) = buf.lock() {
-                        b.extend_from_slice(&chunk[..n]);
+                    if writer.write_all(&chunk[..n]).is_err() {
+                        break;
                     }
+                    let _ = writer.flush();
                 }
             }
         }
     });
 
-    // Only take over stdin when we have a real terminal: enter raw mode and relay
-    // keystrokes to the PTY. With a non-interactive stdin (pipe, /dev/null, redirect)
-    // we leave it alone — forwarding an immediately-closing stdin makes the PTY line
-    // discipline emit spurious echo, and such commands rarely read stdin anyway.
-    let interactive = std::io::stdin().is_terminal();
-    let raw = if interactive { RawGuard::enable() } else { RawGuard(false) };
-    if interactive {
-        let mut writer = pair.master.take_writer()?;
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin();
-            let mut chunk = [0u8; 8192];
-            loop {
-                match stdin.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if writer.write_all(&chunk[..n]).is_err() {
-                            break;
-                        }
-                        let _ = writer.flush();
-                    }
-                }
-            }
-        });
-    }
-
+    let output = relay(rx);
     let status = child.wait()?;
     drop(raw); // restore cooked mode before we print anything else
-    let _ = reader_thread.join();
 
-    let finished_at = Utc::now();
-    let duration_ms = start.elapsed().as_millis() as i64;
-    let output = Arc::try_unwrap(buffer)
-        .map(|m| m.into_inner().unwrap_or_default())
-        .unwrap_or_default();
-
-    let (exit_code, signal) = match status.signal() {
+    let parts = match status.signal() {
         Some(sig) => (None, Some(sig.to_string())),
         None => (Some(status.exit_code() as i32), None),
     };
-
-    Ok(Recorded { output, exit_code, signal, started_at, finished_at, duration_ms })
+    Ok(recorded(output, parts, started_at, start))
 }

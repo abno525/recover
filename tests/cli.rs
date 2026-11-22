@@ -68,6 +68,48 @@ fn import_runs(db: &PathBuf, name: &str, runs: &[(i64, &str, &str)]) -> Output {
     out
 }
 
+/// Run `cmd`, killing it and failing the test if it is still running after `secs`.
+/// `stdin`: `Some(bytes)` writes them and closes stdin; `None` keeps stdin open and silent
+/// until the process exits (so a terminal under `script` never sees EOF).
+fn output_within(mut cmd: Command, stdin: Option<&[u8]>, secs: u64) -> Output {
+    use std::io::Write;
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("failed to spawn");
+    let mut pipe = child.stdin.take();
+    if let Some(data) = stdin {
+        let mut w = pipe.take().unwrap();
+        w.write_all(data).unwrap();
+    }
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let out = match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+        Ok(out) => out.expect("wait failed"),
+        Err(_) => {
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+            panic!("timed out after {secs}s");
+        }
+    };
+    drop(pipe);
+    out
+}
+
+/// Run a shell command line inside a pseudo-terminal (util-linux `script`), so recover sees
+/// a terminal on stdin and takes its PTY path. `None` when `script` is not installed.
+fn run_in_tty(db: &PathBuf, cmdline: &str, secs: u64) -> Option<Output> {
+    if Command::new("script").arg("-V").output().is_err() {
+        eprintln!("skipping: script(1) is not installed");
+        return None;
+    }
+    let mut c = Command::new("script");
+    c.args(["-qec", cmdline, "/dev/null"])
+        .env("RECOVER_DB", db)
+        .env("RECOVER_CONFIG", cfg_path("absent"));
+    Some(output_within(c, None, secs))
+}
+
 fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
@@ -80,12 +122,31 @@ fn records_then_lists_and_prints_output() {
     let list = run(&db, &[]);
     assert!(stdout(&list).contains("echo hello"), "list was: {}", stdout(&list));
 
-    // raw output preserves the PTY line ending; --strip normalizes it
+    // --strip removes ANSI escapes and normalizes PTY line endings (CRLF -> LF)
     let out = run(&db, &["out", "1", "--strip"]);
     assert_eq!(stdout(&out), "hello\n");
 
     let cmd = run(&db, &["cmd", "1"]);
     assert_eq!(stdout(&cmd), "echo hello\n");
+}
+
+#[test]
+fn piped_stdin_reaches_the_command() {
+    let db = tmp_db("stdin-pipe");
+    let cmd = recover_cmd(&db, &cfg_path("absent"), &["run", "--", "cat"]);
+    let out = output_within(cmd, Some(b"hi\n"), 10);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout(&out), "hi\n", "live output");
+    assert_eq!(stdout(&run(&db, &["out", "1"])), "hi\n", "stored output");
+}
+
+#[test]
+fn a_terminal_stdin_runs_the_command_in_a_pty() {
+    let db = tmp_db("stdin-tty");
+    let line = format!("'{}' run -- sh -c 'test -t 1 && echo tty'", bin());
+    let Some(out) = run_in_tty(&db, &line, 10) else { return };
+    assert!(out.status.success(), "script stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout(&run(&db, &["out", "1", "--strip"])), "tty\n");
 }
 
 #[test]

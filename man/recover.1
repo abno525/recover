@@ -59,6 +59,12 @@ runs the arguments as a shell pipeline via
 the argument vector is executed directly. A pipeline typed unquoted
 (\fBr echo x | grep x\fR) records only the first stage \(em your interactive shell owns the
 pipe before \fBr\fR sees it; quote it or use \fB\-c\fR.
+.PP
+Output is shown live and recorded with stdout and stderr combined. When stdin is a
+terminal, the command runs in a pseudo\-terminal, so colors and full\-screen programs work
+and your keystrokes reach it. When input is piped or redirected (\fBcat log | r grep err\fR),
+the command runs without one: stdin passes straight through and output is captured from a
+pipe, so programs may turn colors off.
 .SH QUERYING
 Every run action can be written id\-first (\fBrecover 42 out\fR) or verb\-first
 (\fBrecover out 42\fR).
