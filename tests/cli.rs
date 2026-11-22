@@ -234,6 +234,28 @@ fn max_output_caps_what_is_stored_but_not_what_is_shown() {
 }
 
 #[test]
+fn a_slow_reader_still_gets_all_the_output() {
+    use std::io::Read;
+    let db = tmp_db("slow-reader");
+    let mut cmd = recover_cmd(&db, &cfg_path("absent"), &["run", "--", "seq", "1", "100000"]);
+    let mut child = cmd.stdout(Stdio::piped()).spawn().unwrap();
+    let mut out = child.stdout.take().unwrap();
+    // Read 4 KiB every 20 ms: ~3 s for the ~590 KB, well past the 2 s drain cap.
+    let (mut got, mut buf) = (Vec::new(), [0u8; 4096]);
+    loop {
+        let n = out.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(child.wait().unwrap().success());
+    assert_eq!(String::from_utf8_lossy(&got).lines().count(), 100000, "live output");
+    assert_eq!(stdout(&run(&db, &["out", "1"])).lines().count(), 100000, "stored output");
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);

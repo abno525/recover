@@ -64,8 +64,10 @@ pub fn run_command(argv: &[String], max_output: usize) -> Result<Recorded> {
 }
 
 /// Read `reader` to EOF on its own thread, sending each chunk to the returned channel.
+/// The channel is bounded, so a slow stdout slows the command down (as a plain pipe
+/// would) instead of piling its output up in memory.
 fn spawn_reader(mut reader: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(16);
     std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         loop {
@@ -88,7 +90,9 @@ fn spawn_reader(mut reader: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8
 const POLL: Duration = Duration::from_millis(25);
 /// After the child exits, stop once its output has been quiet this long...
 const DRAIN_IDLE: Duration = Duration::from_millis(200);
-/// ...or this long after the exit at the latest, even if output keeps coming.
+/// ...or this long after the exit at the latest, even if output keeps coming. Time spent
+/// waiting for our own stdout to accept output doesn't count, so a slow terminal or pipe
+/// never loses output the command already wrote.
 const DRAIN_MAX: Duration = Duration::from_secs(2);
 
 /// Copy output to our stdout and keep a copy, until the child has exited and its output
@@ -108,12 +112,17 @@ fn pump(
     let mut stdout = std::io::stdout();
     let mut exited: Option<(ExitStatus, Instant)> = None;
     let mut last_output = Instant::now();
+    let mut blocked_after_exit = Duration::ZERO;
     loop {
         match rx.recv_timeout(POLL) {
             Ok(chunk) => {
                 captured.push(&chunk);
+                let writing = Instant::now();
                 let _ = stdout.write_all(&chunk);
                 let _ = stdout.flush();
+                if exited.is_some() {
+                    blocked_after_exit += writing.elapsed();
+                }
                 last_output = Instant::now();
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -129,7 +138,9 @@ fn pump(
                 }
             }
             Some((_, at)) => {
-                if last_output.elapsed() >= DRAIN_IDLE || at.elapsed() >= DRAIN_MAX {
+                if last_output.elapsed() >= DRAIN_IDLE
+                    || at.elapsed().saturating_sub(blocked_after_exit) >= DRAIN_MAX
+                {
                     break;
                 }
             }
