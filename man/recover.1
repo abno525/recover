@@ -208,7 +208,9 @@ Used by \fB\-c\fR and \fBrerun\fR to run shell command lines. Default \fB/bin/sh
 .SH FILES
 .TP
 .B ~/.local/share/recover/recover.db
-Default database (a single SQLite file).
+Default database (a single SQLite file). It holds every recorded command line and its
+output, so recover keeps it private: the file is mode 0600 (an existing file is
+tightened) and a data directory it creates is 0700. Export files are created 0600 too.
 .TP
 .B ~/.config/recover/config
 Configuration file (optional).

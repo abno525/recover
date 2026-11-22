@@ -2,7 +2,7 @@
 
 use crate::render::Rgb;
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Whether convenience shortcuts (negative indices, bare-duration dates) are enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,12 +151,48 @@ pub fn db_path() -> PathBuf {
     base.join("recover").join("recover.db")
 }
 
-/// Ensure the parent directory of `path` exists.
-pub fn ensure_parent(path: &std::path::Path) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
+/// Ensure the parent directory of `path` exists. Directories created here are private
+/// (0700); existing ones are left as they are.
+pub fn ensure_parent(path: &Path) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+            .create(dir)
             .with_context(|| format!("creating data directory {}", dir.display()))?;
     }
+    Ok(())
+}
+
+/// Make sure `path` exists and only its owner can read it: create it 0600, or tighten an
+/// existing file that group/others can access. Run history holds every recorded command
+/// line and its output, so it gets the same treatment as a shell history file.
+pub fn ensure_private_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.permissions().mode() & 0o077 != 0 => {
+                // Best effort: a file we can open but don't own stays usable.
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .mode(0o600)
+                    .open(path)
+                    .with_context(|| format!("creating {}", path.display()))?;
+            }
+            Err(e) => return Err(e).with_context(|| format!("checking {}", path.display())),
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

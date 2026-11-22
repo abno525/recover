@@ -88,6 +88,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 impl Db {
     /// Open (creating if needed) the database at `path` and apply migrations.
     pub fn open(path: &Path) -> Result<Db> {
+        crate::config::ensure_private_file(path)?;
         let conn = Connection::open(path)?;
         migrate(&conn)?;
         Ok(Db { conn })

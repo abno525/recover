@@ -1,5 +1,6 @@
 //! End-to-end tests driving the compiled `recover` binary against a temp database.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -384,6 +385,49 @@ fn config_rejects_an_unknown_subcommand() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("unknown config subcommand"), "stderr: {err}");
+}
+
+fn mode(p: &std::path::Path) -> u32 {
+    std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+}
+
+#[test]
+fn a_new_database_is_private() {
+    let db = tmp_db("perm-new");
+    run(&db, &["run", "--", "true"]);
+    assert_eq!(mode(&db), 0o600, "db file mode");
+}
+
+#[test]
+fn an_existing_world_readable_database_is_tightened() {
+    let db = tmp_db("perm-old");
+    run(&db, &["run", "--", "true"]);
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+    run(&db, &[]);
+    assert_eq!(mode(&db), 0o600, "db file mode after reopening");
+}
+
+#[test]
+fn a_created_data_directory_is_private() {
+    let mut root = std::env::temp_dir();
+    root.push(format!("recover-it-{}-permdir", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let db = root.join("sub").join("recover.db");
+    run(&db, &["run", "--", "true"]);
+    assert_eq!(mode(&root.join("sub")), 0o700, "created dir mode");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_export_file_is_private() {
+    let db = tmp_db("perm-export");
+    run(&db, &["run", "--", "true"]);
+    let mut json = std::env::temp_dir();
+    json.push(format!("recover-it-{}-perm-export.json", std::process::id()));
+    let _ = std::fs::remove_file(&json);
+    run(&db, &["export", json.to_str().unwrap()]);
+    assert_eq!(mode(&json), 0o600, "export file mode");
+    let _ = std::fs::remove_file(&json);
 }
 
 #[test]
