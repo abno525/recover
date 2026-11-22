@@ -161,8 +161,8 @@ fn truncate_chars(s: &str, max: usize) -> String {
     t
 }
 
-/// Render full detail for a single run (metadata header + output).
-pub fn format_show(run: &Run) -> String {
+/// Render full detail for a single run: metadata header, then its output.
+pub fn format_show(run: &Run, output: &[u8]) -> String {
     let mut out = String::new();
     out.push_str(&format!("id:       {}\n", run.id));
     out.push_str(&format!("command:  {}\n", run.command));
@@ -176,7 +176,7 @@ pub fn format_show(run: &Run) -> String {
         out.push_str(&format!("comment:  {comment}\n"));
     }
     out.push_str("output:\n");
-    out.push_str(&decode_lossy_stripped(&run.output));
+    out.push_str(&decode_lossy_stripped(output));
     out
 }
 
@@ -193,7 +193,6 @@ mod tests {
         Run {
             id: 1,
             command: "x".into(),
-            output: Vec::new(),
             exit_code: exit,
             signal: signal.map(|s| s.to_string()),
             started_at: Utc.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap(),

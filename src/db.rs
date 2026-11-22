@@ -8,11 +8,6 @@ use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-/// Decode a run's stored output for regex matching (ANSI stripped, lossy UTF-8).
-fn decoded_output(bytes: &[u8]) -> String {
-    decode_lossy_stripped(bytes)
-}
-
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,8 +25,11 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);";
 
+/// Every column except `output`, which is read separately and only when needed.
 const COLS: &str =
-    "id, command, output, exit_code, signal, started_at, finished_at, duration_ms, cwd, host, shell, comment";
+    "id, command, exit_code, signal, started_at, finished_at, duration_ms, cwd, host, shell, comment";
+/// Index of `output` when a query appends it after [`COLS`].
+const OUTPUT_COL: usize = 11;
 
 /// A handle to the recover database.
 pub struct Db {
@@ -52,16 +50,15 @@ fn row_to_run(row: &rusqlite::Row) -> rusqlite::Result<Run> {
     Ok(Run {
         id: row.get(0)?,
         command: row.get(1)?,
-        output: row.get(2)?,
-        exit_code: row.get(3)?,
-        signal: row.get(4)?,
-        started_at: ts_from_sql(5, &row.get::<_, String>(5)?)?,
-        finished_at: ts_from_sql(6, &row.get::<_, String>(6)?)?,
-        duration_ms: row.get(7)?,
-        cwd: row.get(8)?,
-        host: row.get(9)?,
-        shell: row.get(10)?,
-        comment: row.get(11)?,
+        exit_code: row.get(2)?,
+        signal: row.get(3)?,
+        started_at: ts_from_sql(4, &row.get::<_, String>(4)?)?,
+        finished_at: ts_from_sql(5, &row.get::<_, String>(5)?)?,
+        duration_ms: row.get(6)?,
+        cwd: row.get(7)?,
+        host: row.get(8)?,
+        shell: row.get(9)?,
+        comment: row.get(10)?,
     })
 }
 
@@ -131,6 +128,21 @@ impl Db {
         Ok(run)
     }
 
+    /// Fetch a run's raw captured output (ANSI and all), or `None` if there is no such run.
+    pub fn output(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        let out = self
+            .conn
+            .query_row("SELECT output FROM runs WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        Ok(out)
+    }
+
+    /// Number of recorded runs.
+    pub fn count(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
     /// Set (or clear, with `None`) a run's comment. Returns true if the run existed.
     pub fn set_comment(&self, id: i64, comment: Option<&str>) -> Result<bool> {
         let n = self
@@ -163,8 +175,10 @@ impl Db {
 
     /// Query runs matching `filters`, newest first.
     ///
-    /// Cheap predicates (date bounds, exit code) run in SQL; regex predicates run in Rust
-    /// against the command and ANSI-stripped output, so the `limit` is applied last.
+    /// Date bounds and the exit code are filtered in SQL. Regex filters run in Rust as rows
+    /// stream past, and scanning stops once `limit` runs matched, so memory stays at one
+    /// row at a time. The output blob is read only for `out:`/`reg:`, and is borrowed from
+    /// SQLite for the match rather than copied into the result.
     pub fn query(&self, filters: &Filters) -> Result<Vec<Run>> {
         use rusqlite::types::Value;
 
@@ -183,53 +197,44 @@ impl Db {
             vals.push(Value::Integer(exit as i64));
         }
 
-        let mut sql = format!("SELECT {COLS} FROM runs");
+        let cmd_re = filters.cmd_re.as_deref().map(Regex::new).transpose()?;
+        let out_re = filters.out_re.as_deref().map(Regex::new).transpose()?;
+        let reg_re = filters.reg_re.as_deref().map(Regex::new).transpose()?;
+        let com_re = filters.com_re.as_deref().map(Regex::new).transpose()?;
+        let needs_output = out_re.is_some() || reg_re.is_some();
+
+        let mut sql = format!("SELECT {COLS}{} FROM runs", if needs_output { ", output" } else { "" });
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
         sql.push_str(" ORDER BY id DESC");
 
+        let limit = filters.limit.filter(|&n| n > 0);
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(vals), row_to_run)?;
-        let mut runs: Vec<Run> = rows.collect::<rusqlite::Result<_>>()?;
-
-        let cmd_re = filters.cmd_re.as_deref().map(Regex::new).transpose()?;
-        let out_re = filters.out_re.as_deref().map(Regex::new).transpose()?;
-        let reg_re = filters.reg_re.as_deref().map(Regex::new).transpose()?;
-        let com_re = filters.com_re.as_deref().map(Regex::new).transpose()?;
-
-        if cmd_re.is_some() || out_re.is_some() || reg_re.is_some() || com_re.is_some() {
-            runs.retain(|run| {
-                let decoded = || decoded_output(&run.output);
-                if let Some(re) = &cmd_re
-                    && !re.is_match(&run.command)
+        let mut rows = stmt.query(rusqlite::params_from_iter(vals))?;
+        let mut runs = Vec::new();
+        while limit.is_none_or(|n| runs.len() < n)
+            && let Some(row) = rows.next()?
+        {
+            let run = row_to_run(row)?;
+            let cmd_ok = |re: &Regex| re.is_match(&run.command);
+            if cmd_re.as_ref().is_some_and(|re| !cmd_ok(re))
+                || com_re
+                    .as_ref()
+                    .is_some_and(|re| !re.is_match(run.comment.as_deref().unwrap_or("")))
+            {
+                continue;
+            }
+            if needs_output {
+                let text = decode_lossy_stripped(row.get_ref(OUTPUT_COL)?.as_blob()?);
+                if out_re.as_ref().is_some_and(|re| !re.is_match(&text))
+                    || reg_re.as_ref().is_some_and(|re| !cmd_ok(re) && !re.is_match(&text))
                 {
-                    return false;
+                    continue;
                 }
-                if let Some(re) = &out_re
-                    && !re.is_match(&decoded())
-                {
-                    return false;
-                }
-                if let Some(re) = &reg_re
-                    && !re.is_match(&run.command)
-                    && !re.is_match(&decoded())
-                {
-                    return false;
-                }
-                if let Some(re) = &com_re
-                    && !re.is_match(run.comment.as_deref().unwrap_or(""))
-                {
-                    return false;
-                }
-                true
-            });
-        }
-
-        match filters.limit {
-            None | Some(0) => {}
-            Some(n) => runs.truncate(n),
+            }
+            runs.push(run);
         }
         Ok(runs)
     }
@@ -356,6 +361,26 @@ mod tests {
     }
 
     #[test]
+    fn count_counts_every_run() {
+        assert_eq!(seeded().count().unwrap(), 3);
+        assert_eq!(Db::open_in_memory().unwrap().count().unwrap(), 0);
+    }
+
+    #[test]
+    fn output_fetches_one_runs_raw_bytes() {
+        let db = Db::open_in_memory().unwrap();
+        let id = db.insert(&sample()).unwrap();
+        assert_eq!(db.output(id).unwrap(), Some(vec![b'h', b'i', 0xFF, b'\n']));
+        assert_eq!(db.output(999).unwrap(), None);
+    }
+
+    #[test]
+    fn output_filter_with_limit_scans_past_newer_non_matches() {
+        let f = Filters { out_re: Some("clean".into()), limit: Some(1), ..Default::default() };
+        assert_eq!(commands(&seeded().query(&f).unwrap()), vec!["git status"]);
+    }
+
+    #[test]
     fn query_strips_ansi_before_matching_output() {
         let db = Db::open_in_memory().unwrap();
         // "\x1b[31mred\x1b[0m" — "red" wrapped in ANSI color codes
@@ -442,7 +467,7 @@ mod tests {
 
         assert_eq!(got.id, id);
         assert_eq!(got.command, "echo hello");
-        assert_eq!(got.output, vec![b'h', b'i', 0xFF, b'\n']);
+        assert_eq!(db.output(id).unwrap().unwrap(), vec![b'h', b'i', 0xFF, b'\n']);
         assert_eq!(got.exit_code, Some(0));
         assert_eq!(got.signal, None);
         assert_eq!(got.started_at, sample().started_at);

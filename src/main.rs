@@ -270,11 +270,11 @@ fn cmd_out(rest: &[String]) -> Result<i32> {
     let idx = id.ok_or_else(|| anyhow::anyhow!("usage: recover out <id> [--strip]"))?;
     let db = open_db()?;
     let id = resolve_index(&db, idx)?;
-    let run = db.get(id)?.ok_or_else(|| no_such(id))?;
+    let output = db.output(id)?.ok_or_else(|| no_such(id))?;
     let bytes = if strip {
-        text::decode_lossy_stripped(&run.output).into_bytes()
+        text::decode_lossy_stripped(&output).into_bytes()
     } else {
-        run.output
+        output
     };
     std::io::stdout().write_all(&bytes)?;
     Ok(0)
@@ -294,7 +294,8 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     let db = open_db()?;
     let id = resolve_index(&db, idx)?;
     let run = db.get(id)?.ok_or_else(|| no_such(id))?;
-    print!("{}", render::format_show(&run));
+    let output = db.output(id)?.unwrap_or_default();
+    print!("{}", render::format_show(&run, &output));
     Ok(0)
 }
 
@@ -330,7 +331,7 @@ fn cmd_rm(rest: &[String]) -> Result<i32> {
 
 fn cmd_clear(rest: &[String]) -> Result<i32> {
     let db = open_db()?;
-    let n = db.query(&Filters { limit: Some(0), ..Default::default() })?.len();
+    let n = db.count()?;
     if rest.iter().any(|a| a == "--yes") {
         let removed = db.clear()?;
         println!("deleted {removed} runs");
@@ -365,12 +366,12 @@ fn cmd_export(rest: &[String]) -> Result<i32> {
     let file = rest.iter().find(|a| a.as_str() != "--json");
     let db = open_db()?;
     let runs = db.query(&Filters { limit: Some(0), ..Default::default() })?;
-    let exported: Vec<ExportRun> = runs
-        .into_iter()
-        .map(|r| ExportRun {
+    let mut exported = Vec::with_capacity(runs.len());
+    for r in runs {
+        exported.push(ExportRun {
+            output_b64: BASE64_STANDARD.encode(db.output(r.id)?.unwrap_or_default()),
             id: r.id,
             command: r.command,
-            output_b64: BASE64_STANDARD.encode(&r.output),
             exit_code: r.exit_code,
             signal: r.signal,
             started_at: r.started_at.to_rfc3339(),
@@ -380,8 +381,8 @@ fn cmd_export(rest: &[String]) -> Result<i32> {
             host: r.host,
             shell: r.shell,
             comment: r.comment,
-        })
-        .collect();
+        });
+    }
     let json = serde_json::to_string_pretty(&exported)?;
     match file {
         Some(path) => {

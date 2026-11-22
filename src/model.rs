@@ -2,12 +2,12 @@
 
 use chrono::{DateTime, Utc};
 
-/// A single recorded command execution.
+/// A single recorded command execution. The captured output is not part of it: it can be
+/// large, so it is fetched on its own with [`crate::db::Db::output`] when needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
     pub id: i64,
     pub command: String,
-    pub output: Vec<u8>,
     pub exit_code: Option<i32>,
     pub signal: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -19,7 +19,7 @@ pub struct Run {
     pub comment: Option<String>,
 }
 
-/// A run ready to be inserted — same as [`Run`] but without an assigned `id`.
+/// A run ready to be inserted: [`Run`] plus its output, without an assigned `id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRun {
     pub command: String,
