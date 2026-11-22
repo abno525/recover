@@ -61,12 +61,61 @@ pub fn run_command(argv: &[String], max_output: usize) -> Result<Recorded> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
+    if let Some((status, problem)) = not_runnable(&argv[0]) {
+        // Report it the way a shell does, in both paths, and still record the attempt.
+        let msg = format!("recover: {}: {problem}\n", argv[0]);
+        eprint!("{msg}");
+        let now = Utc::now();
+        return Ok(Recorded {
+            output: msg.into_bytes(),
+            exit_code: Some(status),
+            signal: None,
+            status,
+            started_at: now,
+            finished_at: now,
+            duration_ms: 0,
+        });
+    }
     let capture = Capture::new(max_output);
     if std::io::stdin().is_terminal() {
         run_in_pty(argv, capture)
     } else {
         run_piped(argv, capture)
     }
+}
+
+/// Why `program` can't be run, with the status a shell would give: 127 when it isn't
+/// found, 126 when it exists but can't be executed. `None` when it can run.
+fn not_runnable(program: &str) -> Option<(i32, &'static str)> {
+    use std::path::Path;
+    let executable = |p: &Path| {
+        p.is_file()
+            && std::ffi::CString::new(p.as_os_str().as_encoded_bytes())
+                // SAFETY: access(2) only reads the NUL-terminated path.
+                .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0)
+    };
+    if program.contains('/') {
+        let p = Path::new(program);
+        return if executable(p) {
+            None
+        } else if p.is_dir() {
+            Some((126, "Is a directory"))
+        } else if p.exists() {
+            Some((126, "Permission denied"))
+        } else {
+            Some((127, "No such file or directory"))
+        };
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut exists = false;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if executable(&candidate) {
+            return None;
+        }
+        exists |= candidate.is_file();
+    }
+    Some(if exists { (126, "Permission denied") } else { (127, "command not found") })
 }
 
 /// Read `reader` to EOF on its own thread, sending each chunk to the returned channel.

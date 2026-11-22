@@ -331,6 +331,41 @@ fn piping_a_query_into_head_ends_quietly() {
 }
 
 #[test]
+fn a_missing_command_exits_127_and_is_recorded() {
+    let db = tmp_db("notfound");
+    let out = run(&db, &["run", "--", "no-such-command-xyz"]);
+    assert_eq!(out.status.code(), Some(127), "like a shell");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(err, "recover: no-such-command-xyz: command not found\n");
+    let show = stdout(&run(&db, &["show", "1"]));
+    assert!(show.contains("status:   127"), "show was: {show}");
+}
+
+#[test]
+fn a_missing_command_in_a_pty_gets_the_same_short_error() {
+    let db = tmp_db("notfound-tty");
+    let line = format!("'{}' run -- no-such-command-xyz", bin());
+    let Some(out) = run_in_tty(&db, &line, 10) else { return };
+    assert_eq!(out.status.code(), Some(127));
+    let text = stdout(&out);
+    assert!(text.contains("no-such-command-xyz: command not found"), "{text:?}");
+    assert!(!text.contains("PATH"), "no $PATH dump: {text:?}");
+}
+
+#[test]
+fn a_file_that_is_not_executable_exits_126() {
+    let db = tmp_db("noexec");
+    let mut file = std::env::temp_dir();
+    file.push(format!("recover-it-{}-noexec.sh", std::process::id()));
+    std::fs::write(&file, "echo hi\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let out = run(&db, &["run", "--", file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(126), "like a shell");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Permission denied"));
+    let _ = std::fs::remove_file(&file);
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);
