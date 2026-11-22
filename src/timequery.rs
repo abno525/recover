@@ -294,6 +294,45 @@ mod tests {
         assert_eq!(parse_instant("2h", now, true).unwrap(), at(2026, 9, 18, 20, 30, 0));
     }
 
+    /// UTC, except that local 00:00-00:59 on 2026-09-06 does not exist (a clock change
+    /// skips it), like Santiago's spring-forward day.
+    #[derive(Clone, Copy, Debug)]
+    struct MidnightGap;
+
+    impl TimeZone for MidnightGap {
+        type Offset = chrono::FixedOffset;
+        fn from_offset(_: &chrono::FixedOffset) -> Self {
+            MidnightGap
+        }
+        fn offset_from_local_date(&self, _: &NaiveDate) -> chrono::MappedLocalTime<chrono::FixedOffset> {
+            chrono::MappedLocalTime::Single(chrono::FixedOffset::east_opt(0).unwrap())
+        }
+        fn offset_from_local_datetime(&self, t: &NaiveDateTime) -> chrono::MappedLocalTime<chrono::FixedOffset> {
+            use chrono::Timelike;
+            if t.date() == NaiveDate::from_ymd_opt(2026, 9, 6).unwrap() && t.hour() == 0 {
+                chrono::MappedLocalTime::None
+            } else {
+                chrono::MappedLocalTime::Single(chrono::FixedOffset::east_opt(0).unwrap())
+            }
+        }
+        fn offset_from_utc_date(&self, _: &NaiveDate) -> chrono::FixedOffset {
+            chrono::FixedOffset::east_opt(0).unwrap()
+        }
+        fn offset_from_utc_datetime(&self, _: &NaiveDateTime) -> chrono::FixedOffset {
+            chrono::FixedOffset::east_opt(0).unwrap()
+        }
+    }
+
+    #[test]
+    fn a_day_whose_midnight_is_skipped_starts_at_its_first_valid_time() {
+        let now = MidnightGap.with_ymd_and_hms(2026, 9, 6, 12, 0, 0).unwrap();
+        let q = |e: &str| parse_instant(e, now, true);
+        assert_eq!(q("today"), Ok(at(2026, 9, 6, 1, 0, 0)));
+        assert_eq!(q("2026-09-06"), Ok(at(2026, 9, 6, 1, 0, 0)));
+        assert_eq!(q("2026-09-07-1day"), Ok(at(2026, 9, 6, 1, 0, 0)), "a step landing in the gap");
+        assert_eq!(q("yesterday"), Ok(at(2026, 9, 5, 0, 0, 0)), "other days are unaffected");
+    }
+
     #[test]
     fn garbage_is_an_error() {
         let now = at(2026, 9, 19, 14, 30, 0);
