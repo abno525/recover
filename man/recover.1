@@ -244,7 +244,9 @@ recover date:14day..7day          # last week, excluding this week
 .RE
 .SH EXIT STATUS
 .B recover run
-exits with the recorded command's exit code. Query commands exit 0 on success and non\-zero
+exits with the recorded command's exit code, or, like a shell, 128 plus the signal number
+when the command was killed by a signal (143 for SIGTERM); the run's status then shows the
+signal's name. Query commands exit 0 on success and non\-zero
 on error (e.g. an unknown run id or an invalid filter).
 .SH SEE ALSO
 .BR sqlite3 (1),

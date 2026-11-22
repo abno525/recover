@@ -160,6 +160,25 @@ fn exit_code_is_recorded_and_propagated() {
 }
 
 #[test]
+fn a_signal_death_exits_128_plus_the_signal_number() {
+    let db = tmp_db("signal-pipe");
+    let out = run(&db, &["run", "--", "sh", "-c", "kill -TERM $$"]);
+    assert_eq!(out.status.code(), Some(143), "SIGTERM is 15, so 128 + 15");
+    let show = stdout(&run(&db, &["show", "1"]));
+    assert!(show.contains("status:   Terminated"), "show was: {show}");
+}
+
+#[test]
+fn a_signal_death_in_a_pty_exits_128_plus_the_signal_number() {
+    let db = tmp_db("signal-tty");
+    let line = format!("'{}' run -- sh -c 'kill -TERM $$'", bin());
+    let Some(out) = run_in_tty(&db, &line, 10) else { return };
+    assert_eq!(out.status.code(), Some(143), "script passes recover's status through");
+    let show = stdout(&run(&db, &["show", "1"]));
+    assert!(show.contains("status:   Terminated"), "show was: {show}");
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);

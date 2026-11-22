@@ -18,6 +18,8 @@ pub struct Recorded {
     pub output: Vec<u8>,
     pub exit_code: Option<i32>,
     pub signal: Option<String>,
+    /// The status to exit with, shell style: the exit code, or 128 + the signal number.
+    pub status: i32,
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
     pub duration_ms: i64,
@@ -89,9 +91,30 @@ fn relay(rx: mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
     captured
 }
 
+/// Split an exit status into (exit code, signal name, shell-style status). A command
+/// killed by a signal has no exit code; like a shell, report 128 + the signal number.
+fn status_parts(status: std::process::ExitStatus) -> (Option<i32>, Option<String>, i32) {
+    match (status.code(), status.signal()) {
+        (Some(code), _) => (Some(code), None, code),
+        (None, Some(sig)) => (None, Some(signal_name(sig)), 128 + sig),
+        (None, None) => (None, None, 1),
+    }
+}
+
+/// The C library's description of a signal (`Terminated`, `Killed`, ...).
+fn signal_name(sig: i32) -> String {
+    // SAFETY: strsignal returns a pointer to a NUL-terminated string (or null), which we
+    // copy out before anything else can call it.
+    let p = unsafe { libc::strsignal(sig) };
+    if p.is_null() {
+        return format!("Signal {sig}");
+    }
+    unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
 fn recorded(
     output: Vec<u8>,
-    (exit_code, signal): (Option<i32>, Option<String>),
+    (exit_code, signal, status): (Option<i32>, Option<String>, i32),
     started_at: DateTime<Utc>,
     start: Instant,
 ) -> Recorded {
@@ -99,6 +122,7 @@ fn recorded(
         output,
         exit_code,
         signal,
+        status,
         started_at,
         finished_at: Utc::now(),
         duration_ms: start.elapsed().as_millis() as i64,
@@ -119,8 +143,7 @@ fn run_piped(argv: &[String]) -> Result<Recorded> {
 
     let output = relay(spawn_reader(reader));
     let status = child.wait()?;
-    let parts = (status.code(), status.signal().map(|n| format!("signal {n}")));
-    Ok(recorded(output, parts, started_at, start))
+    Ok(recorded(output, status_parts(status), started_at, start))
 }
 
 /// A terminal on stdin: run in a PTY, forwarding keystrokes in raw mode.
@@ -142,6 +165,11 @@ fn run_in_pty(argv: &[String]) -> Result<Recorded> {
         .with_context(|| format!("failed to start `{}`", argv[0]))?;
     // Drop the slave in the parent so the master sees EOF once the child exits.
     drop(pair.slave);
+    // On unix portable-pty spawns a plain std child. Use it directly: portable-pty's own
+    // exit status keeps only the signal's name, and we need its number for 128 + n.
+    let child = (child.as_mut() as &mut dyn portable_pty::Child)
+        .downcast_mut::<std::process::Child>()
+        .context("unexpected child process type from the PTY system")?;
 
     let rx = spawn_reader(pair.master.try_clone_reader()?);
     let raw = RawGuard::enable();
@@ -165,10 +193,5 @@ fn run_in_pty(argv: &[String]) -> Result<Recorded> {
     let output = relay(rx);
     let status = child.wait()?;
     drop(raw); // restore cooked mode before we print anything else
-
-    let parts = match status.signal() {
-        Some(sig) => (None, Some(sig.to_string())),
-        None => (Some(status.exit_code() as i32), None),
-    };
-    Ok(recorded(output, parts, started_at, start))
+    Ok(recorded(output, status_parts(status), started_at, start))
 }

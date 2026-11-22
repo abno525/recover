@@ -192,7 +192,7 @@ fn run_and_record(command_str: String, argv: &[String]) -> Result<i32> {
         Ok(_) => {}
         Err(e) => eprintln!("recover: failed to record run: {e:#}"),
     }
-    Ok(rec.exit_code.unwrap_or(1))
+    Ok(rec.status)
 }
 
 // ---- list -----------------------------------------------------------------
