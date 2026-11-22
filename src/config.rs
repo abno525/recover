@@ -1,4 +1,4 @@
-//! Database location resolution and the `~/.recoverc` settings file.
+//! Database location resolution and the settings file.
 
 use crate::render::Rgb;
 use anyhow::{Context, Result};
@@ -19,7 +19,7 @@ pub enum ColorMode {
     Off,
 }
 
-/// Parsed `~/.recoverc` settings.
+/// Parsed settings file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub mode: Mode,
@@ -49,7 +49,7 @@ impl Config {
     }
 }
 
-/// Parse the `~/.recoverc` contents: `key = value` lines, `#` full-line comments.
+/// Parse the config file contents: `key = value` lines, `#` full-line comments.
 pub fn parse(text: &str) -> Result<Config, String> {
     let mut cfg = Config::default();
     for (i, raw) in text.lines().enumerate() {
@@ -90,15 +90,32 @@ pub fn parse(text: &str) -> Result<Config, String> {
     Ok(cfg)
 }
 
-/// Resolve the config path: `$RECOVER_CONFIG`, else `~/.recoverc`.
-pub fn config_path() -> PathBuf {
-    if let Ok(p) = std::env::var("RECOVER_CONFIG")
-        && !p.is_empty()
-    {
+/// Resolve the config path from explicit inputs (empty values count as unset):
+/// `$RECOVER_CONFIG`, else `$XDG_CONFIG_HOME/recover/config`, else
+/// `$HOME/.config/recover/config`. Split out from [`config_path`] so it is testable
+/// without mutating the process environment.
+pub fn resolve_config_path(
+    env_override: Option<&str>,
+    xdg_config: Option<&str>,
+    home: Option<&str>,
+) -> PathBuf {
+    if let Some(p) = env_override.filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".recoverc")
+    let base = match xdg_config.filter(|x| !x.is_empty()) {
+        Some(x) => PathBuf::from(x),
+        None => PathBuf::from(home.filter(|h| !h.is_empty()).unwrap_or(".")).join(".config"),
+    };
+    base.join("recover").join("config")
+}
+
+/// The config file path for this process's environment.
+pub fn config_path() -> PathBuf {
+    resolve_config_path(
+        std::env::var("RECOVER_CONFIG").ok().as_deref(),
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
 }
 
 /// Load config, falling back to defaults when the file is missing. A parse error is
@@ -180,5 +197,29 @@ mod tests {
         assert!(parse("limit = notanumber").is_err());
         assert!(parse("unknown = 1").is_err());
         assert!(parse("noequalssign").is_err());
+    }
+
+    // --- path resolution: inputs are passed in, so no test touches the environment ---
+
+    fn resolve(env: Option<&str>, xdg: Option<&str>, home: Option<&str>) -> String {
+        resolve_config_path(env, xdg, home).display().to_string()
+    }
+
+    #[test]
+    fn env_override_wins_and_empty_means_unset() {
+        assert_eq!(resolve(Some("/tmp/explicit"), Some("/cfg"), Some("/home/u")), "/tmp/explicit");
+        assert_eq!(resolve(Some(""), None, Some("/home/u")), "/home/u/.config/recover/config");
+    }
+
+    #[test]
+    fn xdg_config_home_is_honored_when_set() {
+        assert_eq!(resolve(None, Some("/cfg"), Some("/home/u")), "/cfg/recover/config");
+        assert_eq!(resolve(None, Some(""), Some("/home/u")), "/home/u/.config/recover/config");
+    }
+
+    #[test]
+    fn default_is_under_home_dot_config() {
+        assert_eq!(resolve(None, None, Some("/home/u")), "/home/u/.config/recover/config");
+        assert_eq!(resolve(None, None, None), "./.config/recover/config");
     }
 }

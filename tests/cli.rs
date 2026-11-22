@@ -16,12 +16,12 @@ fn tmp_db(name: &str) -> PathBuf {
 
 fn cfg_path(name: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("recover-it-{}-{}.recoverc", std::process::id(), name));
+    p.push(format!("recover-it-{}-{}.config", std::process::id(), name));
     p
 }
 
 // Default runs point RECOVER_CONFIG at an absent file, so the developer's real
-// ~/.recoverc never affects the tests (defaults: quick mode, color auto).
+// config never affects the tests (defaults: quick mode, color auto).
 fn run(db: &PathBuf, args: &[&str]) -> Output {
     let none = cfg_path("absent");
     let _ = std::fs::remove_file(&none);
@@ -306,6 +306,24 @@ fn rm_is_an_alias_and_missing_id_errors() {
     let missing = run(&db, &["del", "999"]);
     assert!(!missing.status.success(), "del of a missing id should fail");
     assert!(String::from_utf8_lossy(&missing.stderr).contains("no run with id 999"));
+}
+
+#[test]
+fn config_path_reports_the_override() {
+    let db = tmp_db("cfgpath");
+    let cfg = cfg_path("cfgpath");
+    let out = run_cfg(&db, &cfg, &["config", "path"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout(&out).trim(), cfg.to_str().unwrap());
+}
+
+#[test]
+fn config_rejects_an_unknown_subcommand() {
+    let db = tmp_db("cfgbad");
+    let out = run(&db, &["config", "bogus"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown config subcommand"), "stderr: {err}");
 }
 
 #[test]

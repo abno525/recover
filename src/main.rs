@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Write};
 
 const RESERVED: &[&str] = &[
-    "run", "list", "out", "cmd", "show", "rerun", "rm", "del", "clear", "export", "import", "db",
+    "run", "list", "out", "cmd", "show", "rerun", "rm", "del", "clear", "export", "import", "db", "config",
     "help", "--help", "-h",
 ];
 
@@ -53,6 +53,7 @@ fn real_main() -> Result<i32> {
         "export" => cmd_export(rest),
         "import" => cmd_import(rest),
         "db" => cmd_db(rest),
+        "config" => cmd_config(rest),
         _ => {
             print_help();
             Ok(0)
@@ -434,6 +435,18 @@ fn cmd_db(rest: &[String]) -> Result<i32> {
     }
 }
 
+// ---- config ---------------------------------------------------------------
+
+fn cmd_config(rest: &[String]) -> Result<i32> {
+    match rest.first().map(String::as_str) {
+        Some("path") | None => {
+            println!("{}", config::config_path().display());
+            Ok(0)
+        }
+        Some(other) => bail!("unknown config subcommand: {other} (try: recover config path)"),
+    }
+}
+
 // ---- helpers --------------------------------------------------------------
 
 fn shell() -> String {
@@ -462,7 +475,10 @@ fn no_such(id: i64) -> anyhow::Error {
 /// Resolve an index to a concrete id, rejecting negative indices in standard mode.
 fn resolve_index(db: &Db, idx: i64) -> Result<i64> {
     if idx < 0 && !config::load().shortcuts() {
-        bail!("negative indices need quick mode (set `mode = quick` in ~/.recoverc, or use a positive id)");
+        bail!(
+            "negative indices need quick mode (set `mode = quick` in {}, or use a positive id)",
+            config::config_path().display()
+        );
     }
     db.resolve_id(idx)
 }
@@ -500,9 +516,10 @@ USAGE:\n\
   recover export [--json FILE] | import <FILE>    dump / load all runs as JSON\n\
   recover clear --yes                   delete all runs\n\
   recover db path                       print the database file path\n\
+  recover config path                   print the config file path\n\
   recover help                          this message\n\
 \n\
 Filters (cmd:/out:/reg:/com:/date:/exit:/limit:), date expressions, configuration\n\
-(~/.recoverc), and environment variables are documented in the manual: man recover"
+(~/.config/recover/config), and environment variables are documented in the manual: man recover"
     );
 }

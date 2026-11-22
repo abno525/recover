@@ -47,6 +47,14 @@ else
     echo "    $R_LINE"
 fi
 
+# An older recover had an auto-recording shell hook that no longer exists. Point out
+# its line rather than editing the user's rc file behind their back.
+if [ -n "$RC" ] && [ -f "$RC" ] && grep -qF 'recover hook bash' "$RC"; then
+    echo "==> Note: $RC still has the old auto-mode hook line:"
+    grep -nF 'recover hook bash' "$RC" | sed 's/^/        /'
+    echo "    'recover hook' is gone; delete that line or every new shell prints an error."
+fi
+
 # 5. PATH reminder.
 case ":$PATH:" in
     *":$HOME/.cargo/bin:"*) : ;;
