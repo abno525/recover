@@ -41,11 +41,13 @@ impl Drop for RawGuard {
     }
 }
 
-fn terminal_dims() -> (u16, u16) {
-    match crossterm::terminal::size() {
-        Ok((cols, rows)) if cols > 0 && rows > 0 => (cols, rows),
-        _ => (80, 24),
-    }
+/// The size of the terminal on stdin as (rows, cols), or `None` if it has none. A single
+/// ioctl, cheap enough to poll for resizes.
+fn tty_size() -> Option<(u16, u16)> {
+    let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: TIOCGWINSZ writes one `winsize` through the pointer, which is valid for it.
+    let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) };
+    (rc == 0 && ws.ws_row > 0 && ws.ws_col > 0).then_some((ws.ws_row, ws.ws_col))
 }
 
 /// Execute `argv` (program + args), streaming its output live and capturing stdout and
@@ -88,13 +90,18 @@ const DRAIN_IDLE: Duration = Duration::from_millis(200);
 const DRAIN_MAX: Duration = Duration::from_secs(2);
 
 /// Copy output to our stdout and keep a copy, until the child has exited and its output
-/// has drained. Returns the captured bytes and the child's exit status.
+/// has drained. Returns the captured bytes and the child's exit status. `tick` runs on
+/// every turn of the loop (at least every `POLL`).
 ///
 /// EOF alone is not a reliable end: a background job the command started can hold the
 /// output open long after the command itself exited. So once the child is gone, stop at
 /// EOF, after `DRAIN_IDLE` of quiet, or at `DRAIN_MAX`, whichever comes first. The
 /// reader thread is left behind; it ends with the process.
-fn pump(rx: &mpsc::Receiver<Vec<u8>>, child: &mut std::process::Child) -> Result<(Vec<u8>, ExitStatus)> {
+fn pump(
+    rx: &mpsc::Receiver<Vec<u8>>,
+    child: &mut std::process::Child,
+    mut tick: impl FnMut(),
+) -> Result<(Vec<u8>, ExitStatus)> {
     let mut stdout = std::io::stdout();
     let mut captured = Vec::new();
     let mut exited: Option<(ExitStatus, Instant)> = None;
@@ -110,6 +117,7 @@ fn pump(rx: &mpsc::Receiver<Vec<u8>>, child: &mut std::process::Child) -> Result
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break, // EOF: everything was read
         }
+        tick();
         match exited {
             None => {
                 if let Some(status) = child.try_wait()? {
@@ -182,14 +190,15 @@ fn run_piped(argv: &[String]) -> Result<Recorded> {
     // `Command` keeps its copies of the pipe's write end: drop them, or EOF never arrives.
     drop(cmd);
 
-    let (output, status) = pump(&spawn_reader(reader), &mut child)?;
+    let (output, status) = pump(&spawn_reader(reader), &mut child, || {})?;
     Ok(recorded(output, status_parts(status), started_at, start))
 }
 
 /// A terminal on stdin: run in a PTY, forwarding keystrokes in raw mode.
 fn run_in_pty(argv: &[String]) -> Result<Recorded> {
-    let (cols, rows) = terminal_dims();
-    let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+    let pty_size = |(rows, cols)| PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    let mut size = tty_size().unwrap_or((24, 80));
+    let pair = native_pty_system().openpty(pty_size(size))?;
 
     let mut cmd = CommandBuilder::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -230,7 +239,16 @@ fn run_in_pty(argv: &[String]) -> Result<Recorded> {
         }
     });
 
-    let (output, status) = pump(&rx, child)?;
+    // Pass terminal resizes on, so full-screen programs redraw at the new size.
+    let follow_resizes = || {
+        if let Some(now) = tty_size()
+            && now != size
+        {
+            size = now;
+            let _ = pair.master.resize(pty_size(now));
+        }
+    };
+    let (output, status) = pump(&rx, child, follow_resizes)?;
     drop(raw); // restore cooked mode before we print anything else
     Ok(recorded(output, status_parts(status), started_at, start))
 }

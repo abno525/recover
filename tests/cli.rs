@@ -204,6 +204,20 @@ fn a_background_process_does_not_keep_recover_waiting_in_a_pty() {
 }
 
 #[test]
+fn a_terminal_resize_reaches_the_command() {
+    let db = tmp_db("resize");
+    // The command resizes the terminal recover runs in (script's), waits, then reports the
+    // size of its own PTY. recover has to pass the new size on.
+    let line = format!(
+        "OUTER=$(tty) '{}' run -- sh -c 'stty -F \"$OUTER\" rows 20 cols 50; sleep 0.5; stty size'",
+        bin()
+    );
+    let Some(out) = run_in_tty(&db, &line, 10) else { return };
+    assert!(out.status.success(), "script stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout(&run(&db, &["out", "1", "--strip"])), "20 50\n");
+}
+
+#[test]
 fn regex_filters_command_and_output() {
     let db = tmp_db("regex");
     run(&db, &["run", "--", "echo", "alpha"]);
