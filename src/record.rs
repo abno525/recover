@@ -12,7 +12,8 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 /// The result of running a command.
@@ -151,7 +152,7 @@ const DRAIN_IDLE: Duration = Duration::from_millis(200);
 const DRAIN_MAX: Duration = Duration::from_secs(2);
 
 /// Copy output to our stdout and keep a copy, until the child has exited and its output
-/// has drained. Returns the captured bytes and the child's exit status. `tick` runs on
+/// has drained. Returns the captured bytes and the child's exit status. `tick(exited)` runs on
 /// every turn of the loop (at least every `POLL`).
 ///
 /// EOF alone is not a reliable end: a background job the command started can hold the
@@ -162,7 +163,7 @@ fn pump(
     rx: &mpsc::Receiver<Vec<u8>>,
     child: &mut std::process::Child,
     mut captured: Capture,
-    mut tick: impl FnMut(),
+    mut tick: impl FnMut(bool),
 ) -> Result<(Vec<u8>, ExitStatus)> {
     let mut stdout = std::io::stdout();
     let mut exited: Option<(ExitStatus, Instant)> = None;
@@ -191,7 +192,7 @@ fn pump(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break, // EOF: everything was read
         }
-        tick();
+        tick(exited.is_some());
         match exited {
             None => {
                 if let Some(status) = child.try_wait()? {
@@ -298,8 +299,47 @@ fn run_piped(argv: &[String], capture: Capture) -> Result<Recorded> {
     // `Command` keeps its copies of the pipe's write end: drop them, or EOF never arrives.
     drop(cmd);
 
-    let (output, status) = pump(&spawn_reader(reader), &mut child, capture, || {})?;
+    let (output, status) = pump(&spawn_reader(reader), &mut child, capture, |_| {})?;
     Ok(recorded(output, status_parts(status), started_at, start))
+}
+
+/// Copy keystrokes from our stdin to the PTY on a thread, until `stop` is set or stdin
+/// closes. It polls rather than blocking in read, so once the command has exited it stops
+/// reading: keys typed from then on stay queued for the shell instead of vanishing into a
+/// dead PTY. Reads go straight to fd 0, bypassing std's stdin buffer, for the same reason.
+fn forward_keys(mut to_pty: Box<dyn Write + Send>, stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        while !stop.load(Ordering::Relaxed) {
+            let mut pfd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+            // SAFETY: one valid pollfd; 50 ms timeout.
+            match unsafe { libc::poll(&mut pfd, 1, 50) } {
+                0 => continue,
+                n if n < 0 => {
+                    if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                _ if stop.load(Ordering::Relaxed) => break,
+                _ => {}
+            }
+            // SAFETY: reads at most `chunk.len()` bytes into `chunk`.
+            let n = unsafe { libc::read(libc::STDIN_FILENO, chunk.as_mut_ptr().cast(), chunk.len()) };
+            if n <= 0 {
+                break;
+            }
+            if to_pty.write_all(&chunk[..n as usize]).and_then(|()| to_pty.flush()).is_err() {
+                break;
+            }
+        }
+        if stop.load(Ordering::Relaxed) {
+            // Dropping portable-pty's writer types a newline and EOF into the PTY, which a
+            // job still holding it would see (and echo into the recording). recover exits
+            // moments from now, so let the process end close it instead.
+            std::mem::forget(to_pty);
+        }
+    });
 }
 
 /// A terminal on stdin: run in a PTY, forwarding keystrokes in raw mode.
@@ -330,25 +370,15 @@ fn run_in_pty(argv: &[String], capture: Capture) -> Result<Recorded> {
 
     let rx = spawn_reader(pair.master.try_clone_reader()?);
     let raw = RawGuard::enable();
-    let mut writer = pair.master.take_writer()?;
-    std::thread::spawn(move || {
-        let mut stdin = std::io::stdin();
-        let mut chunk = [0u8; 8192];
-        loop {
-            match stdin.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if writer.write_all(&chunk[..n]).is_err() {
-                        break;
-                    }
-                    let _ = writer.flush();
-                }
-            }
-        }
-    });
+    let writer = pair.master.take_writer()?;
+    let stop_forwarding = Arc::new(AtomicBool::new(false));
+    forward_keys(writer, Arc::clone(&stop_forwarding));
 
-    // Pass terminal resizes on, so full-screen programs redraw at the new size.
-    let follow_resizes = || {
+    let follow_child = |exited: bool| {
+        if exited {
+            stop_forwarding.store(true, Ordering::Relaxed);
+        }
+        // Pass terminal resizes on, so full-screen programs redraw at the new size.
         if let Some(now) = tty_size()
             && now != size
         {
@@ -356,7 +386,7 @@ fn run_in_pty(argv: &[String], capture: Capture) -> Result<Recorded> {
             let _ = pair.master.resize(pty_size(now));
         }
     };
-    let (output, status) = pump(&rx, child, capture, follow_resizes)?;
+    let (output, status) = pump(&rx, child, capture, follow_child)?;
     drop(raw); // restore cooked mode before we print anything else
     Ok(recorded(output, status_parts(status), started_at, start))
 }

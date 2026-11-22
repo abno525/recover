@@ -99,6 +99,11 @@ fn output_within(mut cmd: Command, stdin: Option<&[u8]>, secs: u64) -> Output {
 /// Run a shell command line inside a pseudo-terminal (util-linux `script`), so recover sees
 /// a terminal on stdin and takes its PTY path. `None` when `script` is not installed.
 fn run_in_tty(db: &PathBuf, cmdline: &str, secs: u64) -> Option<Output> {
+    run_in_tty_typing(db, cmdline, None, secs)
+}
+
+/// [`run_in_tty`], typing `keys` into the terminal (`None`: an open, silent terminal).
+fn run_in_tty_typing(db: &PathBuf, cmdline: &str, keys: Option<&[u8]>, secs: u64) -> Option<Output> {
     if Command::new("script").arg("-V").output().is_err() {
         eprintln!("skipping: script(1) is not installed");
         return None;
@@ -107,7 +112,7 @@ fn run_in_tty(db: &PathBuf, cmdline: &str, secs: u64) -> Option<Output> {
     c.args(["-qec", cmdline, "/dev/null"])
         .env("RECOVER_DB", db)
         .env("RECOVER_CONFIG", cfg_path("absent"));
-    Some(output_within(c, None, secs))
+    Some(output_within(c, keys, secs))
 }
 
 fn stdout(o: &Output) -> String {
@@ -363,6 +368,50 @@ fn a_file_that_is_not_executable_exits_126() {
     assert_eq!(out.status.code(), Some(126), "like a shell");
     assert!(String::from_utf8_lossy(&out.stderr).contains("Permission denied"));
     let _ = std::fs::remove_file(&file);
+}
+
+#[test]
+fn keys_typed_while_the_command_runs_reach_it() {
+    let db = tmp_db("keys");
+    let line = format!("'{}' run -- head -n 1", bin());
+    let Some(out) = run_in_tty_typing(&db, &line, Some(b"typed-line\n"), 10) else { return };
+    assert!(out.status.success(), "script stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stored = stdout(&run(&db, &["out", "1", "--strip"]));
+    assert!(stored.contains("typed-line"), "stored: {stored:?}");
+}
+
+#[test]
+fn keys_typed_after_the_command_exits_are_not_forwarded() {
+    use std::io::Write;
+    if Command::new("script").arg("-V").output().is_err() {
+        return;
+    }
+    let db = tmp_db("late-keys");
+    // The command exits at once but leaves a ticking job, which keeps recover draining for
+    // about a second. A key typed then must stay with the terminal (the shell gets it);
+    // forwarded into the PTY, it would be echoed there and show up in the recording.
+    let inner = "trap '' HUP; (for i in 1 2 3 4 5 6 7 8 9 10; do echo tick; sleep 0.1; done) &";
+    let line = format!("'{}' run -- sh -c \"{inner}\"", bin());
+    let mut c = Command::new("script");
+    c.args(["-qec", &line, "/dev/null"])
+        .env("RECOVER_DB", &db)
+        .env("RECOVER_CONFIG", cfg_path("absent"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = c.spawn().unwrap();
+    let mut keys = child.stdin.take().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    keys.write_all(b"hello\n").unwrap(); // typed after the command itself has exited
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        assert!(std::time::Instant::now() < deadline, "timed out");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(keys);
+    let stored = stdout(&run(&db, &["out", "1", "--strip"]));
+    assert!(stored.contains("tick\ntick"), "recover should have been draining: {stored:?}");
+    assert!(!stored.contains("hello"), "a late key was forwarded to the PTY: {stored:?}");
 }
 
 #[test]
