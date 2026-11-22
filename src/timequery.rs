@@ -4,7 +4,7 @@
 //! Anchors: `now`, `today`, `yesterday`, `tomorrow`, `YYYY-MM-DD`, RFC3339 datetime.
 //! Units: `s/sec`, `m/min`, `h/hour`, `d/day`, `w/week`, `mon/month`, `y/year`.
 
-use chrono::{DateTime, Duration, Months, NaiveDate, Utc};
+use chrono::{DateTime, Duration, Months, NaiveDate, TimeDelta, Utc};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -89,38 +89,38 @@ fn parse_anchor(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
 }
 
 fn apply_term(base: DateTime<Utc>, sign: i64, n: i64, unit: &str) -> Result<DateTime<Utc>, String> {
-    let signed = sign * n;
+    let overflow = || "date arithmetic overflow".to_string();
+    let signed = sign.checked_mul(n).ok_or_else(overflow)?;
     let unit = unit.to_ascii_lowercase();
     let dur = match unit.as_str() {
-        "s" | "sec" | "secs" | "second" | "seconds" => Some(Duration::seconds(signed)),
-        "m" | "min" | "mins" | "minute" | "minutes" => Some(Duration::minutes(signed)),
-        "h" | "hr" | "hrs" | "hour" | "hours" => Some(Duration::hours(signed)),
-        "d" | "day" | "days" => Some(Duration::days(signed)),
-        "w" | "wk" | "wks" | "week" | "weeks" => Some(Duration::weeks(signed)),
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(TimeDelta::try_seconds(signed)),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(TimeDelta::try_minutes(signed)),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(TimeDelta::try_hours(signed)),
+        "d" | "day" | "days" => Some(TimeDelta::try_days(signed)),
+        "w" | "wk" | "wks" | "week" | "weeks" => Some(TimeDelta::try_weeks(signed)),
         _ => None,
     };
     if let Some(dur) = dur {
-        return base
-            .checked_add_signed(dur)
-            .ok_or_else(|| "date arithmetic overflow".to_string());
+        return dur
+            .and_then(|d| base.checked_add_signed(d))
+            .ok_or_else(overflow);
     }
-    let months = match unit.as_str() {
-        "mon" | "month" | "months" => Some(n as u32),
-        "y" | "yr" | "yrs" | "year" | "years" => Some(n as u32 * 12),
-        _ => None,
+    let months_per = match unit.as_str() {
+        "mon" | "month" | "months" => 1,
+        "y" | "yr" | "yrs" | "year" | "years" => 12,
+        _ => return Err(format!("unrecognized time unit: {unit}")),
     };
-    match months {
-        Some(m) => {
-            let months = Months::new(m);
-            let res = if sign < 0 {
-                base.checked_sub_months(months)
-            } else {
-                base.checked_add_months(months)
-            };
-            res.ok_or_else(|| "date arithmetic overflow".to_string())
-        }
-        None => Err(format!("unrecognized time unit: {unit}")),
-    }
+    let months = u32::try_from(n)
+        .ok()
+        .and_then(|n| n.checked_mul(months_per))
+        .map(Months::new)
+        .ok_or_else(overflow)?;
+    let res = if sign < 0 {
+        base.checked_sub_months(months)
+    } else {
+        base.checked_add_months(months)
+    };
+    res.ok_or_else(overflow)
 }
 
 #[cfg(test)]
@@ -214,6 +214,28 @@ mod tests {
         // explicit anchors still work in standard mode
         assert_eq!(parse_instant("today-3day", now, false).unwrap(), at(2026, 9, 16, 0, 0, 0));
         assert_eq!(parse_instant("now-2h", now, false).unwrap(), at(2026, 9, 19, 12, 30, 0));
+    }
+
+    #[test]
+    fn huge_offsets_are_errors_not_panics() {
+        let now = at(2026, 9, 19, 14, 30, 0);
+        for expr in [
+            "today-99999999999999day",
+            "today-99999999999999week",
+            "now-99999999999999999s",
+            "now-99999999999999999h",
+            "today-999999999year",
+            "99999999999999day",
+        ] {
+            assert!(p(expr, now).is_err(), "{expr} should be an error");
+        }
+    }
+
+    #[test]
+    fn month_count_is_not_silently_truncated() {
+        let now = at(2026, 9, 19, 14, 30, 0);
+        // 4294967297 = 2^32 + 1; a plain `as u32` cast would turn it into 1 month.
+        assert!(p("today-4294967297month", now).is_err());
     }
 
     #[test]
